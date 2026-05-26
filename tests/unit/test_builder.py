@@ -700,7 +700,7 @@ class TestRestartStagingSymlinks:
 
     def test_runner_supports_recognizes_var_keyword(self) -> None:
         """Direct unit on the introspection helper itself."""
-        from admixture_cache.builder import _runner_supports
+        from admixture_cache._dispatch import _runner_supports
 
         class _ExplicitKwarg:
             def run(self, *, args: list[str], cwd: Path, log_dir: Path,
@@ -1252,6 +1252,251 @@ class TestAutoMaxParallelRestarts:
         with patch("admixture_cache.builder.os.cpu_count", return_value=8):
             got = _auto_max_parallel_restarts(threads=0, n_seeds=5)
         assert got >= 1
+
+
+class TestNumaPinning:
+    """`numa_node_per_restart=True` makes build_panel_cache pass
+    ``argv_prefix=["numactl", "--membind=N", "--"]`` to the runner for
+    each parallel restart. Skipped (no-op) on platforms without
+    numactl, single-socket boxes, or sequential execution."""
+
+    def test_numa_disabled_by_default_no_argv_prefix(self, tmp_path: Path) -> None:
+        """Default `numa_node_per_restart=False` → no argv_prefix forwarded."""
+        observed: list[list[str] | None] = []
+
+        class _ArgvObservingRunner:
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+                argv_prefix: list[str] | None = None,
+            ) -> object:
+                observed.append(argv_prefix)
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        build_panel_cache(
+            panel_bed=panel_bed,
+            panel_pop_file=pop,
+            clusters_yaml=yaml,
+            k=2,
+            cache_dir=cache_dir,
+            admixture_runner=_ArgvObservingRunner(),
+            track="regional",
+            panel_id="p1",
+            panel_version="v1",
+            admixture_version="1.4.0",
+            seeds=[1, 2],
+            threads=1,
+            sd_threshold=10.0,
+            max_parallel_restarts=2,
+        )
+        # All calls saw argv_prefix=None — no NUMA pinning requested.
+        assert observed == [None, None]
+
+    def test_numa_enabled_no_numactl_falls_back_silently(
+        self, tmp_path: Path,
+    ) -> None:
+        """When `numa_node_per_restart=True` but numactl isn't on PATH,
+        the build proceeds without pinning (logs a warning)."""
+        from unittest.mock import patch as _patch
+
+        observed: list[list[str] | None] = []
+
+        class _Runner:
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+                argv_prefix: list[str] | None = None,
+            ) -> object:
+                observed.append(argv_prefix)
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        # Mock numactl missing.
+        with _patch("admixture_cache.builder.shutil.which", return_value=None):
+            build_panel_cache(
+                panel_bed=panel_bed,
+                panel_pop_file=pop,
+                clusters_yaml=yaml,
+                k=2,
+                cache_dir=cache_dir,
+                admixture_runner=_Runner(),
+                track="regional",
+                panel_id="p1",
+                panel_version="v1",
+                admixture_version="1.4.0",
+                seeds=[1, 2],
+                threads=1,
+                sd_threshold=10.0,
+                max_parallel_restarts=2,
+                numa_node_per_restart=True,
+            )
+        # numactl missing → no argv_prefix forwarded.
+        assert observed == [None, None]
+
+    def test_numa_enabled_multi_node_spreads_restarts(
+        self, tmp_path: Path,
+    ) -> None:
+        """With numactl available and 2 NUMA nodes detected, two
+        parallel restarts land on nodes 0 and 1 (one each)."""
+        from unittest.mock import patch as _patch
+
+        observed: dict[int, list[str] | None] = {}
+
+        class _Runner:
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+                argv_prefix: list[str] | None = None,
+            ) -> object:
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                observed[seed] = argv_prefix
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        with _patch("admixture_cache.builder.shutil.which", return_value="/usr/bin/numactl"), \
+             _patch("admixture_cache.builder._detect_numa_nodes", return_value=2):
+            build_panel_cache(
+                panel_bed=panel_bed,
+                panel_pop_file=pop,
+                clusters_yaml=yaml,
+                k=2,
+                cache_dir=cache_dir,
+                admixture_runner=_Runner(),
+                track="regional",
+                panel_id="p1",
+                panel_version="v1",
+                admixture_version="1.4.0",
+                seeds=[1, 2],
+                threads=1,
+                sd_threshold=10.0,
+                max_parallel_restarts=2,
+                numa_node_per_restart=True,
+            )
+        # Seed 1 → node 0; seed 2 → node 1 (sorted seed order).
+        assert observed[1] == ["numactl", "--membind=0", "--"]
+        assert observed[2] == ["numactl", "--membind=1", "--"]
+
+    def test_numa_enabled_sequential_skipped(self, tmp_path: Path) -> None:
+        """Even with numactl + multi-node, sequential execution
+        (max_parallel_restarts=1) is a no-op — pinning doesn't help
+        one process at a time."""
+        from unittest.mock import patch as _patch
+
+        observed: list[list[str] | None] = []
+
+        class _Runner:
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+                argv_prefix: list[str] | None = None,
+            ) -> object:
+                observed.append(argv_prefix)
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        with _patch("admixture_cache.builder.shutil.which", return_value="/usr/bin/numactl"), \
+             _patch("admixture_cache.builder._detect_numa_nodes", return_value=4):
+            build_panel_cache(
+                panel_bed=panel_bed,
+                panel_pop_file=pop,
+                clusters_yaml=yaml,
+                k=2,
+                cache_dir=cache_dir,
+                admixture_runner=_Runner(),
+                track="regional",
+                panel_id="p1",
+                panel_version="v1",
+                admixture_version="1.4.0",
+                seeds=[1, 2],
+                threads=1,
+                sd_threshold=10.0,
+                max_parallel_restarts=1,
+                numa_node_per_restart=True,
+            )
+        assert observed == [None, None]
+
+    def test_detect_numa_nodes_no_sysfs(self) -> None:
+        """On macOS / containers without sysfs, _detect_numa_nodes returns 1."""
+        from unittest.mock import patch as _patch
+
+        from admixture_cache.builder import _detect_numa_nodes
+
+        with _patch("admixture_cache.builder.Path") as path_cls:
+            instance = path_cls.return_value
+            instance.is_dir.return_value = False
+            assert _detect_numa_nodes() == 1
 
 
 class TestBuildPanelCacheAutoDefault:

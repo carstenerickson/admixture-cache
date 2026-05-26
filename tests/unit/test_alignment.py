@@ -176,6 +176,110 @@ class TestAlignTargetToPanelBim:
         assert runner.calls[0]["timeout_seconds"] == 1234
 
 
+class TestTargetFormatDetection:
+    """`_detect_target_format` returns the right plink2 input flag
+    based on the target's extension or sibling-file presence."""
+
+    def _make_bed_triplet(self, tmp_path: Path, stem: str = "target") -> Path:
+        bed = tmp_path / f"{stem}.bed"
+        bed.write_bytes(b"\x6c\x1b\x01")
+        (tmp_path / f"{stem}.bim").write_text("1\trs1\t0\t1\tA\tC\n")
+        (tmp_path / f"{stem}.fam").write_text("F\tI\t0\t0\t0\t-9\n")
+        return bed
+
+    def _make_pgen_triplet(self, tmp_path: Path, stem: str = "target") -> Path:
+        pgen = tmp_path / f"{stem}.pgen"
+        pgen.write_bytes(b"\x6c\x1b\x10\x00")  # any non-empty content
+        (tmp_path / f"{stem}.psam").write_text("#FID\tIID\nF\tI\n")
+        (tmp_path / f"{stem}.pvar").write_text("#CHROM\tPOS\tID\tREF\tALT\n1\t1\trs1\tA\tC\n")
+        return pgen
+
+    def test_bed_suffix_detected(self, tmp_path: Path) -> None:
+        from admixture_cache.alignment import _detect_target_format
+
+        bed = self._make_bed_triplet(tmp_path)
+        flag, stem = _detect_target_format(bed)
+        assert flag == "--bfile"
+        assert stem == tmp_path / "target"
+
+    def test_pgen_suffix_detected(self, tmp_path: Path) -> None:
+        from admixture_cache.alignment import _detect_target_format
+
+        pgen = self._make_pgen_triplet(tmp_path)
+        flag, stem = _detect_target_format(pgen)
+        assert flag == "--pfile"
+        assert stem == tmp_path / "target"
+
+    def test_suffixless_prefers_pgen(self, tmp_path: Path) -> None:
+        """When both BED and PGEN siblings exist and the user passes a
+        no-suffix stem, PGEN wins (it's the more modern format)."""
+        from admixture_cache.alignment import _detect_target_format
+
+        self._make_bed_triplet(tmp_path)
+        self._make_pgen_triplet(tmp_path)
+        flag, _stem = _detect_target_format(tmp_path / "target")
+        assert flag == "--pfile"
+
+    def test_suffixless_falls_back_to_bed(self, tmp_path: Path) -> None:
+        """No-suffix stem with only BED siblings → --bfile."""
+        from admixture_cache.alignment import _detect_target_format
+
+        self._make_bed_triplet(tmp_path)
+        flag, _stem = _detect_target_format(tmp_path / "target")
+        assert flag == "--bfile"
+
+    def test_missing_raises_actionable_error(self, tmp_path: Path) -> None:
+        from admixture_cache.alignment import _detect_target_format
+
+        with pytest.raises(PanelCacheError, match="not found as either"):
+            _detect_target_format(tmp_path / "nonexistent")
+
+
+class TestAlignWithPgenInput:
+    """When target_bed points at a PGEN, align_target_to_panel_bim
+    swaps --bfile for --pfile in the plink2 call."""
+
+    def test_pgen_input_uses_pfile_flag(self, tmp_path: Path) -> None:
+        pgen = tmp_path / "target.pgen"
+        pgen.write_bytes(b"\x6c\x1b\x10\x00")
+        (tmp_path / "target.psam").write_text("#FID\tIID\nF\tI\n")
+        (tmp_path / "target.pvar").write_text("#CHROM\tPOS\tID\tREF\tALT\n")
+        (tmp_path / "panel.bim").write_text("")
+        runner = _MockRunner(emit_bed=True)
+        align_target_to_panel_bim(
+            target_bed=pgen,  # PGEN path passed in BED-named parameter
+            panel_bim=tmp_path / "panel.bim",
+            output_prefix=tmp_path / "aligned",
+            plink2_runner=runner,
+            log_dir=tmp_path / "logs",
+        )
+        args = runner.calls[0]["args"]
+        assert "--pfile" in args
+        assert "--bfile" not in args
+        # The stem (path without suffix) follows --pfile.
+        pfile_idx = args.index("--pfile")
+        assert args[pfile_idx + 1] == str(tmp_path / "target")
+
+    def test_bed_input_still_uses_bfile_flag(self, tmp_path: Path) -> None:
+        """Sanity: BED input keeps the existing --bfile behavior."""
+        bed = tmp_path / "target.bed"
+        bed.write_bytes(b"\x6c\x1b\x01")
+        (tmp_path / "target.bim").write_text("")
+        (tmp_path / "target.fam").write_text("")
+        (tmp_path / "panel.bim").write_text("")
+        runner = _MockRunner(emit_bed=True)
+        align_target_to_panel_bim(
+            target_bed=bed,
+            panel_bim=tmp_path / "panel.bim",
+            output_prefix=tmp_path / "aligned",
+            plink2_runner=runner,
+            log_dir=tmp_path / "logs",
+        )
+        args = runner.calls[0]["args"]
+        assert "--bfile" in args
+        assert "--pfile" not in args
+
+
 class TestExtractTargetDosageViaPlink2:
     def _raw_for(self, dosages: list[str]) -> str:
         """Build a plink2 --recode A .raw file with one sample row."""

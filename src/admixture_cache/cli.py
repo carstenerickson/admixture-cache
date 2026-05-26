@@ -61,6 +61,7 @@ class SubprocessToolRunner:
         timeout_seconds: int = 600,
         log_name: str | None = None,
         pid_callback: Callable[[int], None] | None = None,
+        argv_prefix: list[str] | None = None,
     ) -> object:
         log_dir.mkdir(parents=True, exist_ok=True)
         if log_name is not None:
@@ -77,7 +78,11 @@ class SubprocessToolRunner:
         if log_path.exists():
             log_path.replace(prev_path)
             rotated = True
-        cmd = [self.binary, *args]
+        # argv_prefix wraps the binary call — e.g. ["numactl",
+        # "--membind=0", "--"] pins the spawned process's memory
+        # allocations to NUMA node 0. The prefix elements go BEFORE
+        # self.binary in the spawned argv.
+        cmd = [*(argv_prefix or []), self.binary, *args]
         try:
             log_file = log_path.open("w")
         except OSError as exc:

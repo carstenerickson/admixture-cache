@@ -13,7 +13,6 @@ speedup at the ADMIXTURE training step.
 from __future__ import annotations
 
 import contextlib
-import inspect
 import json
 import logging
 import os
@@ -26,10 +25,11 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import numpy as np
 
+from admixture_cache._dispatch import _call_runner, _runner_supports
 from admixture_cache.errors import PanelCacheError
 from admixture_cache.io import (
     load_cache_manifest,
@@ -52,21 +52,63 @@ class _RestartResult(TypedDict):
     wallclock_seconds: float
 
 
-def _runner_supports(runner: ToolRunner, param: str) -> bool:
-    """Return True if ``runner.run`` accepts the named keyword
-    parameter — either explicitly or via a ``**kwargs`` forwarder.
-    Falls back to ``False`` on any inspection failure so older runners
-    that predate Protocol extensions degrade gracefully.
+def _detect_numa_nodes() -> int:
+    """Return the number of NUMA nodes on the current host.
+
+    Reads ``/sys/devices/system/node/`` which Linux populates with one
+    ``nodeN`` subdirectory per NUMA node. Returns 1 on platforms where
+    the path doesn't exist (macOS, Windows, single-node Linux without
+    the sysfs entries).
     """
-    try:
-        params = inspect.signature(runner.run).parameters
-    except (TypeError, ValueError):
-        return False
-    if param in params:
-        return True
-    # A `**kwargs` forwarder (the idiomatic adapter pattern) accepts
-    # any keyword, including our optional Protocol extensions.
-    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    node_dir = Path("/sys/devices/system/node")
+    if not node_dir.is_dir():
+        return 1
+    return sum(1 for p in node_dir.iterdir() if p.name.startswith("node"))
+
+
+def _resolve_numa_nodes(*, enabled: bool, effective_parallelism: int) -> int:
+    """Decide how many NUMA nodes to spread restarts across.
+
+    Returns 1 (i.e. "no pinning") in any of these cases:
+    - operator passed ``numa_node_per_restart=False`` (default)
+    - sequential execution (pinning doesn't help with one process)
+    - ``numactl`` not on PATH (macOS, minimal Linux containers)
+    - the host has 1 NUMA node (single-socket box)
+
+    Otherwise returns ``min(n_nodes, effective_parallelism)`` — capping
+    at the actual parallelism so we don't reserve more nodes than we'll
+    use.
+    """
+    if not enabled:
+        return 1
+    if effective_parallelism < 2:
+        logger.info(
+            "build_panel_cache: numa_node_per_restart=True but only one "
+            "restart in flight; skipping NUMA pinning (no-op)",
+        )
+        return 1
+    if shutil.which("numactl") is None:
+        logger.warning(
+            "build_panel_cache: numa_node_per_restart=True but `numactl` "
+            "not on PATH; skipping NUMA pinning (install numactl or set "
+            "the flag to False to silence this warning)",
+        )
+        return 1
+    n_nodes = _detect_numa_nodes()
+    if n_nodes < 2:
+        logger.info(
+            "build_panel_cache: numa_node_per_restart=True but host has "
+            "%d NUMA node(s); skipping NUMA pinning (single-socket box)",
+            n_nodes,
+        )
+        return 1
+    use_n = min(n_nodes, effective_parallelism)
+    logger.info(
+        "build_panel_cache: NUMA pinning enabled — spreading %d restarts "
+        "across %d node(s) (host has %d node(s) total)",
+        effective_parallelism, use_n, n_nodes,
+    )
+    return use_n
 
 
 def _auto_max_parallel_restarts(*, threads: int, n_seeds: int) -> int:
@@ -83,32 +125,6 @@ def _auto_max_parallel_restarts(*, threads: int, n_seeds: int) -> int:
     """
     cores = os.cpu_count() or 1
     return max(1, min(n_seeds, cores // max(threads * 2, 1)))
-
-
-def _call_runner(
-    runner: ToolRunner,
-    *,
-    args: list[str],
-    cwd: Path,
-    log_dir: Path,
-    timeout_seconds: int,
-    log_name: str | None = None,
-    pid_callback: Callable[[int], None] | None = None,
-) -> object:
-    """Invoke ``runner.run`` with the optional ``log_name`` /
-    ``pid_callback`` extensions when the runner supports them, plain
-    invocation otherwise."""
-    kwargs: dict[str, Any] = {
-        "args": args,
-        "cwd": cwd,
-        "log_dir": log_dir,
-        "timeout_seconds": timeout_seconds,
-    }
-    if log_name is not None and _runner_supports(runner, "log_name"):
-        kwargs["log_name"] = log_name
-    if pid_callback is not None and _runner_supports(runner, "pid_callback"):
-        kwargs["pid_callback"] = pid_callback
-    return runner.run(**kwargs)
 
 
 def build_panel_cache(
@@ -135,6 +151,16 @@ def build_panel_cache(
     # (`cores // (threads * 2)`, capped at len(seeds)); pass an
     # explicit positive integer to override.
     max_parallel_restarts: int | None = None,
+    # NUMA pinning: when True (and Linux + numactl available + multi-
+    # socket box), each parallel restart's subprocess is wrapped with
+    # `numactl --membind=N --` where N is `(restart_index % n_nodes)`.
+    # Pins memory allocation to the chosen NUMA node, avoiding the
+    # ~2-3× cross-node latency penalty when ADMIXTURE's working set
+    # is bigger than one node's local memory. Worth +10-30% on
+    # multi-socket hardware (n2-standard-32+, c2-standard-30+);
+    # no-op on single-socket boxes. Skipped with a warning if
+    # numactl isn't on PATH.
+    numa_node_per_restart: bool = False,
     # Default 24 hr. Empirical: K=21 regional cache on AADR v66 HO
     # (27K samples × 580K SNPs) needs ~12-14 hr per restart to reach
     # delta<0.0001 (each QN/Block iter ~25 min; ~25 iters to converge).
@@ -274,6 +300,30 @@ def build_panel_cache(
             effective_parallelism * threads,
         )
 
+    # Resolve NUMA pinning. Skip silently on platforms / setups that
+    # don't support it (no numactl on PATH, single-node machine, or
+    # sequential execution where pinning doesn't help). Logs the
+    # decision so operators can confirm at INFO level.
+    numa_n_nodes = _resolve_numa_nodes(
+        enabled=numa_node_per_restart,
+        effective_parallelism=effective_parallelism,
+    )
+
+    # Seed → NUMA node assignment, sorted by sort-order of seeds so
+    # the same `seeds=[...]` always lands on the same node mapping.
+    # Stable assignment helps reproducibility (build wallclock is
+    # NUMA-affinity-sensitive on multi-socket boxes).
+    numa_node_for_seed: dict[int, int] = (
+        {s: i % numa_n_nodes for i, s in enumerate(sorted(seeds))}
+        if numa_n_nodes > 1 else {}
+    )
+
+    def _argv_prefix_for_seed(seed: int) -> list[str] | None:
+        node = numa_node_for_seed.get(seed)
+        if node is None:
+            return None
+        return ["numactl", f"--membind={node}", "--"]
+
     # PIDs of in-flight subprocesses, keyed by seed. The reference
     # SubprocessToolRunner reports its PID via pid_callback; the
     # parallel-mode guard above requires the runner support
@@ -304,6 +354,7 @@ def build_panel_cache(
                 per_restart_timeout_seconds=per_restart_timeout_seconds,
                 pid_callback=_make_pid_callback(seed),
                 allow_log_scan_fallback=(effective_parallelism == 1),
+                argv_prefix=_argv_prefix_for_seed(seed),
             )
         finally:
             # Drop the PID once the runner has returned (subprocess is
@@ -554,6 +605,7 @@ def _run_one_admixture_restart(
     per_restart_timeout_seconds: int,
     pid_callback: Callable[[int], None] | None = None,
     allow_log_scan_fallback: bool = True,
+    argv_prefix: list[str] | None = None,
 ) -> _RestartResult:
     """Run one supervised-ADMIXTURE restart at the given seed.
 
@@ -658,6 +710,7 @@ def _run_one_admixture_restart(
         timeout_seconds=per_restart_timeout_seconds,
         log_name=log_name,
         pid_callback=pid_callback,
+        argv_prefix=argv_prefix,
     )
     restart_elapsed = time.time() - restart_t0
 

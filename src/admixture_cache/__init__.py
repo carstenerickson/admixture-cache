@@ -44,7 +44,12 @@ from admixture_cache.projection import (
 )
 from admixture_cache.runner import ToolRunner
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+
+# Imported last so cli.py's `from admixture_cache import ...` resolves
+# against the partially-loaded package after the other re-exports above
+# are already bound.
+from admixture_cache.cli import SubprocessToolRunner
 
 __all__ = [
     # Public API — cache build (slow, one-time)
@@ -70,8 +75,9 @@ __all__ = [
     # importable for callers mid-migration. Identical to
     # PanelCacheError; safe to delete once no consumer relies on it.
     "PopAutomationConfigError",
-    # Runner Protocol (for consumers' type hints)
+    # Runner Protocol (for consumers' type hints) + reference impl
     "ToolRunner",
+    "SubprocessToolRunner",
     # Version
     "__version__",
 ]

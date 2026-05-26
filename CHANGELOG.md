@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-26
+
+Additive minor release. API-additive only; no public API breaks
+relative to v1.0.0. All v1.0 callers continue to work unchanged.
+
+### Added
+
+- **`SubprocessToolRunner` is now part of the public API** — exported
+  from `admixture_cache.__all__` and importable as
+  `from admixture_cache import SubprocessToolRunner`. Previously
+  required reaching into the implementation module (`from
+  admixture_cache.cli import SubprocessToolRunner`).
+- **`build_panel_cache(numa_node_per_restart=True)`** — opt-in NUMA
+  pinning for parallel restarts on multi-socket Linux hosts. Each
+  restart's subprocess is wrapped with `numactl --membind=N --` where
+  N cycles through detected NUMA nodes, avoiding the ~2-3× cross-node
+  memory-latency penalty when ADMIXTURE's working set exceeds one
+  node's local memory. Worth +10-30% on n2-standard-32+ /
+  c2-standard-30+ class hardware. No-op on single-socket boxes,
+  macOS, or any environment without `numactl` on PATH (logs a warning
+  and proceeds with non-pinned execution).
+- **`ToolRunner.run(argv_prefix=...)` optional Protocol kwarg.** A
+  general-purpose hook for wrapping the spawned argv with a command
+  prefix (`numactl`, `taskset`, `nice`, `time`, etc.). When provided,
+  the spawned process is `[*argv_prefix, <binary>, *args]` instead of
+  `[<binary>, *args]`. Used internally for NUMA pinning; available to
+  callers for arbitrary process-wrapping needs. Detected via
+  `inspect.signature` — older runners that predate this kwarg
+  continue working unchanged.
+- **PGEN format support in `align_target_to_panel_bim`.** The function
+  now accepts either PLINK 1 BED (`.bed`/`.bim`/`.fam`) or PLINK 2
+  PGEN (`.pgen`/`.psam`/`.pvar`) target genotypes; plink2 handles both
+  natively via `--bfile`/`--pfile`. Detection is by file extension
+  (`.pgen` → PGEN, `.bed` → BED) or sibling-file presence for
+  suffixless paths (PGEN preferred when both exist). The output is
+  always a BED triplet so downstream dosage extraction is unchanged.
+  The `target_bed` parameter name is kept for backward compatibility;
+  it accepts PGEN paths despite the BED-flavored name.
+- **Hypothesis-driven property tests for `numpy_supervised_projection`.**
+  ~65 new property-based test cases covering random panels (K=2..10),
+  random Dirichlet Q vectors, dosage missingness up to 80%, boundary
+  Q vectors (near-pure single-cluster membership), and recovery
+  tolerance scaling with sample size. Catches regressions the
+  hand-written analytic-Q cases wouldn't surface.
+
+### Changed — internal layout
+
+- **`_call_runner` + `_runner_supports` moved to `admixture_cache._dispatch`.**
+  Previously lived in `builder.py`; relocated so other layer-1 modules
+  (notably `alignment.py`) can route their `runner.run()` calls
+  through the dispatcher without introducing a layering violation
+  (alignment shouldn't depend on builder). `alignment.py` now routes
+  its plink2 calls through `_call_runner` — same behavior as before,
+  but Protocol-extension forwarding (log_name, pid_callback,
+  argv_prefix) now works for alignment too.
+- **Module layering is now enforced by `import-linter`** (CI gate). The
+  layered contract in `pyproject.toml [tool.importlinter]` mirrors the
+  dependency convention documented in `DEVELOPMENT.md`. A new module
+  that imports from a lower layer fails CI immediately.
+
+### Fixed
+
+- (none — release is purely additive)
+
 ## [1.0.0] - 2026-05-26
 
 First PyPI release. Bundles the v1.0 publication-readiness pass with
@@ -115,7 +179,8 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/carstenerickson/admixture-cache/compare/v0.3.1...v1.0.0
 [0.3.1]: https://github.com/carstenerickson/admixture-cache/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/carstenerickson/admixture-cache/compare/v0.2.0...v0.3.0

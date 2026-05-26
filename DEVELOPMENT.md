@@ -86,7 +86,7 @@ Key observations:
 - `builder` and `orchestration` are siblings — neither imports the other. Phase 1 (build) and phase 2 (project) only share the `io` / `manifest` modules below them.
 - `alignment` and `projection` don't import each other; `orchestration` is the first place they meet.
 - `runner` is imported only under `TYPE_CHECKING` in the implementation modules (dotted edges above). The injected runner objects are used structurally at runtime without needing the Protocol class itself.
-- No tooling enforces this layering; it's a maintenance convention. Worth a `ruff` `flake8-tidy-imports` rule or similar if someone wants to lock it in.
+- Layering is enforced by **import-linter** (config in `pyproject.toml` under `[tool.importlinter]`); CI runs `lint-imports` as a fourth gate alongside pytest/ruff/mypy. The contract type is `layers`: each declared layer can only import from layers *above* it (lower index). Adding a new module means adding it to the right layer; if the import-linter check fails, that's the signal.
 
 ## Two-phase data flow
 

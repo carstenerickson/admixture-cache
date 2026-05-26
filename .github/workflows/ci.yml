@@ -42,5 +42,8 @@ jobs:
       - name: Type check
         run: mypy src/
 
+      - name: Import layering (import-linter contracts)
+        run: lint-imports
+
       - name: Tests
         run: pytest --cov=src/admixture_cache --cov-report=term-missing

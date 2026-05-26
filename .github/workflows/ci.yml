@@ -80,11 +80,11 @@ jobs:
       - name: Install plink2 (Linux x86_64)
         run: |
           set -euo pipefail
-          # plink2 ships a dev-build zip on cog-genomics.org. The
-          # `alpha7` channel is what `pyproject`'s integration suite
-          # targets; the URL pattern is stable across point bumps.
+          # cog-genomics S3 publishes a `_latest.zip` symlink to the
+          # current dev build. The bucket root (no subdir) hosts the
+          # baseline x86_64 build, which is what we want for CI.
           curl -fsSL -o /tmp/plink2.zip \
-            "https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_amd_avx2_latest.zip"
+            "https://s3.amazonaws.com/plink2-assets/plink2_linux_x86_64_latest.zip"
           unzip -o /tmp/plink2.zip -d /tmp/plink2/
           sudo install -m 0755 /tmp/plink2/plink2 /usr/local/bin/plink2
           plink2 --version 2>&1 | head -1

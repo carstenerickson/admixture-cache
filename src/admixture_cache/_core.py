@@ -38,18 +38,18 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+import re
+import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from scipy.optimize import minimize
 
-from admixture_cache.errors import (
-    PopAutomationConfigError,
-)
+from admixture_cache.errors import PanelCacheError
 
 if TYPE_CHECKING:
     from admixture_cache.runner import ToolRunner
@@ -82,7 +82,7 @@ class PanelCacheManifest(BaseModel):
     best_loglikelihood: float
     restart_sd_max: float
     cluster_order: list[str]
-    geo_filter_yaml_shas: dict[str, str] = field(default_factory=dict)
+    geo_filter_yaml_shas: dict[str, str] = Field(default_factory=dict)
     pgen_samplebind_version: str | None = None
     build_wallclock_seconds: float
     build_timestamp: str
@@ -140,7 +140,7 @@ def numpy_supervised_projection(
     P_obs = p_matrix[mask]
 
     if g_obs.size == 0:
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             "numpy_supervised_projection: target has zero non-missing "
             "SNPs after mask; cannot project (no data).",
         )
@@ -212,7 +212,7 @@ def build_panel_cache(
     skip rebuild and return the existing manifest.
 
     On multimodality failure (max per-cluster restart_sd > sd_threshold),
-    raises PopAutomationConfigError after saving partial outputs for
+    raises PanelCacheError after saving partial outputs for
     debugging. Cache is NOT marked valid (no manifest.json written).
 
     Returns the validated PanelCacheManifest.
@@ -227,7 +227,7 @@ def build_panel_cache(
     # Compute current config SHAs for idempotency + manifest
     panel_bim_path = panel_bed.with_suffix(".bim")
     if not panel_bim_path.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"build_panel_cache: panel .bim missing at {panel_bim_path}",
         )
     panel_bim_sha = sha256_file(panel_bim_path)
@@ -300,7 +300,7 @@ def build_panel_cache(
                     for other in future_to_seed:
                         if not other.done():
                             other.cancel()
-                    raise PopAutomationConfigError(
+                    raise PanelCacheError(
                         f"build_panel_cache: parallel restart seed={seed} "
                         f"failed: {exc}",
                     ) from exc
@@ -316,7 +316,7 @@ def build_panel_cache(
     # Pick best LL restart
     with_ll = [r for r in per_restart_results if r["ll"] is not None]
     if not with_ll:
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             "build_panel_cache: no restart produced a parseable "
             "loglikelihood; check build_logs/",
         )
@@ -340,7 +340,7 @@ def build_panel_cache(
         )
         # Multimodality validation
         if restart_sd_max > sd_threshold:
-            raise PopAutomationConfigError(
+            raise PanelCacheError(
                 f"build_panel_cache: multimodality detected — max per-cluster "
                 f"restart SD = {restart_sd_max:.4f} > threshold {sd_threshold}. "
                 f"Cache NOT marked valid. Investigate: different seeds? "
@@ -366,13 +366,12 @@ def build_panel_cache(
     )
 
     # Copy best restart's outputs to the canonical cache locations
-    import shutil as _shutil
     best_p_dest = cache_dir / f"panel.{k}.P"
     best_q_dest = cache_dir / f"panel.{k}.Q"
-    _shutil.copy2(best["p_path"], best_p_dest)
-    _shutil.copy2(best["q_path"], best_q_dest)
+    shutil.copy2(best["p_path"], best_p_dest)
+    shutil.copy2(best["q_path"], best_q_dest)
     # Also copy panel.bim for projection-time variant alignment
-    _shutil.copy2(panel_bim_path, cache_dir / "panel.bim")
+    shutil.copy2(panel_bim_path, cache_dir / "panel.bim")
 
     # Write restart_sd.json (per-cluster max SD across non-anchor samples)
     restart_sd_per_cluster = {
@@ -444,7 +443,6 @@ def _run_one_admixture_restart(
     Safe to call concurrently with different seeds: each restart has
     its own isolated working directory + log file.
     """
-    import shutil as _shutil
 
     restart_dir = cache_dir / f"build_restart_{seed}"
     restart_dir.mkdir(exist_ok=True)
@@ -456,10 +454,10 @@ def _run_one_admixture_restart(
         src = panel_bed.with_suffix(suffix)
         dst = restart_dir / f"panel{suffix}"
         if not dst.exists():
-            _shutil.copy2(src, dst)
+            shutil.copy2(src, dst)
     pop_dst = restart_dir / "panel.pop"
     if not pop_dst.exists():
-        _shutil.copy2(panel_pop_file, pop_dst)
+        shutil.copy2(panel_pop_file, pop_dst)
 
     log_file = log_dir / f"restart_{seed}.out"
     logger.info(
@@ -484,7 +482,7 @@ def _run_one_admixture_restart(
     p_path = restart_dir / f"panel.{k}.P"
     q_path = restart_dir / f"panel.{k}.Q"
     if not p_path.exists() or not q_path.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"_run_one_admixture_restart: restart seed={seed} produced "
             f"no output files (looked for {p_path} and {q_path}); see "
             f"log_dir={log_dir}",
@@ -512,7 +510,6 @@ def _parse_admixture_loglikelihood(log_text: str) -> float | None:
     ADMIXTURE emits one Loglikelihood line per iteration; the last one
     is the converged value.
     """
-    import re
     matches = re.findall(
         r"Loglikelihood:\s*(-?\d+\.?\d*(?:[eE][+-]?\d+)?)",
         log_text,
@@ -545,7 +542,7 @@ def _derive_cluster_order_from_pop_file(
                 seen.append(label)
                 seen_set.add(label)
     if len(seen) != expected_k:
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"_derive_cluster_order_from_pop_file: {panel_pop_file.name} "
             f"has {len(seen)} distinct non-'-' labels but K={expected_k}. "
             f"Labels: {seen}",
@@ -561,13 +558,13 @@ def load_cached_p(cache_dir: Path, k: int) -> np.ndarray:
     convention)."""
     p_path = cache_dir / f"panel.{k}.P"
     if not p_path.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"load_cached_p: cache file missing: {p_path}; "
             f"run `ancestry-pipeline build-caches` to build it.",
         )
     P = np.loadtxt(p_path)
     if P.ndim != 2 or P.shape[1] != k:
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"load_cached_p: {p_path} has shape {P.shape}; expected "
             f"(M, {k})",
         )
@@ -578,7 +575,7 @@ def load_cache_manifest(cache_dir: Path) -> PanelCacheManifest:
     """Load + validate the cache manifest JSON."""
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"load_cache_manifest: {manifest_path} missing; cache is "
             f"either incomplete or never built.",
         )
@@ -600,7 +597,7 @@ def verify_cache_matches_current_config(
     """
     try:
         manifest = load_cache_manifest(cache_dir)
-    except PopAutomationConfigError as exc:
+    except PanelCacheError as exc:
         return False, f"cache manifest unloadable: {exc}"
 
     if manifest.k != expected_k:
@@ -709,7 +706,7 @@ def ld_prune_panel(
 
     prune_in = output_prefix.with_suffix(".prune.in")
     if not prune_in.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"ld_prune_panel: plink2 --indep-pairwise produced no "
             f"prune.in at {prune_in}; see {log_dir} for the plink2 log",
         )
@@ -729,7 +726,7 @@ def ld_prune_panel(
 
     pruned_bed = output_prefix.with_suffix(".bed")
     if not pruned_bed.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"ld_prune_panel: plink2 --extract produced no output at "
             f"{pruned_bed}; see {log_dir} for the plink2 log",
         )
@@ -787,7 +784,7 @@ def align_target_to_panel_bim(
 
     aligned_bed = output_prefix.with_suffix(".bed")
     if not aligned_bed.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"align_target_to_panel_bim: plink2 succeeded but "
             f"{aligned_bed} not produced",
         )
@@ -828,7 +825,7 @@ def extract_target_dosage_via_plink2(
 
     raw_path = output_prefix.with_suffix(".raw")
     if not raw_path.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"extract_target_dosage_via_plink2: {raw_path} not produced",
         )
 
@@ -836,12 +833,12 @@ def extract_target_dosage_via_plink2(
 
     raw = pd.read_csv(raw_path, sep="\t", na_values=["NA"])
     if raw.shape[0] != 1:
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"extract_target_dosage_via_plink2: expected 1 sample in "
             f"{raw_path}, got {raw.shape[0]}",
         )
     # First 6 columns are FID IID PAT MAT SEX PHENOTYPE; rest are dosages
-    return raw.iloc[0, 6:].values.astype(np.float64)
+    return raw.iloc[0, 6:].to_numpy().astype(np.float64)
 
 
 # ─── Top-level projection orchestration ──────────────────────────────────
@@ -878,7 +875,7 @@ def project_target(
 
     panel_bim = cache_dir / "panel.bim"
     if not panel_bim.exists():
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"project_target: cache missing panel.bim at {panel_bim}",
         )
 
@@ -904,7 +901,7 @@ def project_target(
     # Step 4: load cached P
     P = load_cached_p(cache_dir, manifest.k)
     if P.shape[0] != dosage.shape[0]:
-        raise PopAutomationConfigError(
+        raise PanelCacheError(
             f"project_target: cached P has {P.shape[0]} SNPs but "
             f"aligned target dosage has {dosage.shape[0]} — alignment "
             f"step may have failed silently",

@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "admixture-cache"
+version = "0.1.0"
+description = "Precomputed-P supervised-ADMIXTURE projection cache: build slow once, project fast per target."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.15"
+authors = [
+    { name = "Carsten Erickson", email = "carstene@mailbox.org" },
+]
+keywords = [
+    "bioinformatics",
+    "genetics",
+    "admixture",
+    "ancestry",
+    "population-genetics",
+    "supervised-admixture",
+    "projection-cache",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.26,<3",
+    "scipy>=1.11,<2",
+    "pydantic>=2.5,<3",
+    "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "build>=1.2",
+    "twine>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/carstenerickson/admixture-cache"
+Issues = "https://github.com/carstenerickson/admixture-cache/issues"
+Source = "https://github.com/carstenerickson/admixture-cache"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["admixture_cache*"]
+
+[tool.setuptools.package-data]
+admixture_cache = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88

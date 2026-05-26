@@ -1,0 +1,69 @@
+"""admixture-cache — precomputed-P supervised-ADMIXTURE projection.
+
+Split the slow supervised-ADMIXTURE training pass (panel-only,
+~hours, one-time per panel × K × clusters_yaml combo) out of the
+per-target hot path. After building, project a new target's K-vector
+in <2 seconds via NumPy SLSQP against the cached P matrix.
+
+Two phases, two APIs:
+
+1. **Panel cache build** (operator-facing, slow):
+   - :func:`build_panel_cache` runs stock ADMIXTURE × N restarts via
+     an injected ToolRunner, validates multimodality, writes the
+     canonical cached P + manifest.
+
+2. **Per-target projection** (consumer-facing, fast):
+   - :func:`project_target` aligns target.bed to cached panel.bim
+     + axes (via plink2), reads the target as a dosage vector,
+     solves for Q via scipy SLSQP under the binomial admixture
+     likelihood.
+
+The math is validated to <1e-5 absolute Q-vector match against stock
+ADMIXTURE on real workloads (15K × 850K matrix; see the project's
+Phase 0 validation report).
+"""
+
+from __future__ import annotations
+
+from admixture_cache._core import (
+    PanelCacheManifest,
+    ProjectionResult,
+    align_target_to_panel_bim,
+    build_panel_cache,
+    extract_target_dosage_via_plink2,
+    load_cache_manifest,
+    load_cached_p,
+    numpy_supervised_projection,
+    project_target,
+    sha256_file,
+    verify_cache_matches_current_config,
+)
+from admixture_cache.errors import PanelCacheError
+from admixture_cache.runner import ToolRunner
+
+__version__ = "0.1.0"
+
+__all__ = [
+    # Public API — cache build (slow, one-time)
+    "build_panel_cache",
+    # Public API — per-target projection (fast)
+    "project_target",
+    "numpy_supervised_projection",
+    # Public API — alignment + dosage I/O
+    "align_target_to_panel_bim",
+    "extract_target_dosage_via_plink2",
+    # Public API — cache I/O + validation
+    "load_cached_p",
+    "load_cache_manifest",
+    "verify_cache_matches_current_config",
+    "sha256_file",
+    # Schemas
+    "PanelCacheManifest",
+    "ProjectionResult",
+    # Error type
+    "PanelCacheError",
+    # Runner Protocol (for consumers' type hints)
+    "ToolRunner",
+    # Version
+    "__version__",
+]

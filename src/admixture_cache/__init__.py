@@ -31,6 +31,7 @@ from admixture_cache._core import (
     align_target_to_panel_bim,
     build_panel_cache,
     extract_target_dosage_via_plink2,
+    ld_prune_panel,
     load_cache_manifest,
     load_cached_p,
     numpy_supervised_projection,
@@ -41,11 +42,12 @@ from admixture_cache._core import (
 from admixture_cache.errors import PanelCacheError
 from admixture_cache.runner import ToolRunner
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Public API — cache build (slow, one-time)
     "build_panel_cache",
+    "ld_prune_panel",  # optional pre-step before build_panel_cache
     # Public API — per-target projection (fast)
     "project_target",
     "numpy_supervised_projection",

@@ -188,7 +188,7 @@ def build_panel_cache(
     pgen_samplebind_version: str | None = None,
     seeds: list[int] | None = None,
     sd_threshold: float = 0.02,
-    threads: int = 8,
+    threads: int = 16,
     # Default 24 hr. Empirical: K=21 regional cache on AADR v66 HO
     # (27K samples × 580K SNPs) needs ~12-14 hr per restart to reach
     # delta<0.0001 (each QN/Block iter ~25 min; ~25 iters to converge).
@@ -554,6 +554,117 @@ def sha256_file(path: Path, *, chunk_size: int = 2**16) -> str:
         while chunk := f.read(chunk_size):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ─── LD pruning (optional speedup before ADMIXTURE training) ─────────────
+
+
+def ld_prune_panel(
+    *,
+    panel_bed: Path,
+    output_prefix: Path,
+    plink2_runner: "ToolRunner",
+    window_kb: int = 50,
+    step_size: int = 5,
+    r2_threshold: float = 0.5,
+    log_dir: Path,
+    timeout_seconds: int = 3600,
+) -> Path:
+    """Apply LD-pruning to a panel BED via plink2 --indep-pairwise.
+
+    Per Alexander et al. 2009 and the HLD Exp 2 measurements, LD-pruning
+    is the dominant cost-cutter for supervised-ADMIXTURE training:
+    LD-pruned SNPs are statistically more independent → ADMIXTURE
+    converges in fewer iterations. Combined with the reduced SNP count
+    per iter, a 50/5/0.5 prune typically yields 30-50% of variants and
+    gives 3-5× total speedup.
+
+    Two-step plink2 invocation:
+
+    1. ``plink2 --bfile <panel> --indep-pairwise <window> <step> <r²>
+       --out <output_prefix>``: identifies the LD-pruned variant subset,
+       writes ``<output_prefix>.prune.in`` (variants to keep) and
+       ``<output_prefix>.prune.out`` (variants to remove).
+    2. ``plink2 --bfile <panel> --extract <output_prefix>.prune.in
+       --make-bed --out <output_prefix>``: produces the pruned BED.
+
+    Args:
+        panel_bed: Path to the unpruned panel .bed (with sibling
+            .bim/.fam).
+        output_prefix: Prefix for plink2 outputs. The pruned BED lands
+            at ``<output_prefix>.bed`` (with sibling .bim/.fam).
+        plink2_runner: ToolRunner for plink2 invocations.
+        window_kb: --indep-pairwise window size in kb (default 50).
+        step_size: --indep-pairwise step size in variants (default 5).
+        r2_threshold: --indep-pairwise r² threshold (default 0.5).
+        log_dir: Where to write plink2 logs.
+        timeout_seconds: Per-plink2-call timeout (default 1hr).
+
+    Returns:
+        Path to the pruned ``<output_prefix>.bed``.
+
+    The .pop file is NOT carried through automatically — the caller
+    must regenerate it for the pruned variant set. (In practice the
+    .pop file lists per-sample labels, not per-variant data, so it
+    stays valid unless the sample set also changed; the caller can
+    just copy panel.pop next to the pruned output.)
+    """
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    panel_prefix = panel_bed.with_suffix("")
+
+    # Step 1: identify LD-pruned variant subset
+    plink2_runner.run(
+        args=[
+            "--bfile", str(panel_prefix),
+            "--indep-pairwise",
+            str(window_kb), str(step_size), str(r2_threshold),
+            "--out", str(output_prefix),
+        ],
+        cwd=output_prefix.parent,
+        log_dir=log_dir,
+        timeout_seconds=timeout_seconds,
+    )
+
+    prune_in = output_prefix.with_suffix(".prune.in")
+    if not prune_in.exists():
+        raise PopAutomationConfigError(
+            f"ld_prune_panel: plink2 --indep-pairwise produced no "
+            f"prune.in at {prune_in}; see {log_dir} for the plink2 log",
+        )
+
+    # Step 2: extract the pruned subset into a new BED
+    plink2_runner.run(
+        args=[
+            "--bfile", str(panel_prefix),
+            "--extract", str(prune_in),
+            "--make-bed",
+            "--out", str(output_prefix),
+        ],
+        cwd=output_prefix.parent,
+        log_dir=log_dir,
+        timeout_seconds=timeout_seconds,
+    )
+
+    pruned_bed = output_prefix.with_suffix(".bed")
+    if not pruned_bed.exists():
+        raise PopAutomationConfigError(
+            f"ld_prune_panel: plink2 --extract produced no output at "
+            f"{pruned_bed}; see {log_dir} for the plink2 log",
+        )
+
+    # Diagnostics: count variants before/after for the operator
+    pre_count = sum(1 for _ in panel_bed.with_suffix(".bim").open())
+    post_count = sum(1 for _ in pruned_bed.with_suffix(".bim").open())
+    logger.info(
+        "ld_prune_panel: %s (%d variants) -> %s (%d retained, "
+        "%.1f%% kept, %.2f× SNP reduction)",
+        panel_bed.name, pre_count, pruned_bed.name, post_count,
+        100.0 * post_count / max(pre_count, 1),
+        pre_count / max(post_count, 1),
+    )
+    return pruned_bed
 
 
 # ─── Target-to-panel alignment ───────────────────────────────────────────

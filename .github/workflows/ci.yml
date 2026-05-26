@@ -72,8 +72,9 @@ jobs:
           curl -fsSL -o /tmp/admixture.tar.gz \
             https://dalexander.github.io/admixture/binaries/admixture_linux-1.4.0.tar.gz
           tar -xzf /tmp/admixture.tar.gz -C /tmp/
-          # Tarball extracts a `dist/admixture_linux-1.4.0/` directory.
-          sudo install -m 0755 /tmp/dist/admixture_linux-1.4.0/admixture /usr/local/bin/admixture
+          # Tarball extracts a top-level `admixture_linux-1.4.0/`
+          # directory containing the binary + manual PDF.
+          sudo install -m 0755 /tmp/admixture_linux-1.4.0/admixture /usr/local/bin/admixture
           admixture --help 2>&1 | head -3
 
       - name: Install plink2 (Linux x86_64)

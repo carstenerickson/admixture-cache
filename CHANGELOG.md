@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-26
+
+End-to-end integration testing against real ADMIXTURE + plink2
+binaries. No library code changes; all unit tests + the integration
+suite green.
+
+### Added
+
+- **`tests/integration/` suite — end-to-end pipeline test against
+  real ADMIXTURE 1.4 + plink2 binaries.** Runs the full
+  `build_panel_cache` → `project_target` pipeline on a synthetic
+  3-cluster panel (90 samples × 2000 SNPs, K=3) with 4 held-out
+  targets carrying known Q vectors. Verifies recovery within 0.10
+  absolute per-component (empirical max error on the fixtures:
+  ~0.03 against ADMIXTURE 1.3.0; the 0.10 tolerance leaves
+  generous headroom for 1.3.0 ↔ 1.4.0 drift).
+- **`pytest -m integration`** opt-in marker. Default `pytest` run
+  excludes the integration suite (markers in `[tool.pytest.ini_options]`
+  default the addopts to `-m 'not integration'`). Skipped cleanly
+  when ADMIXTURE / plink2 aren't on PATH.
+- **Deterministic fixture generator** at
+  `tests/integration/_generate_fixtures.py` — writes the panel + 4
+  target BED triplets via a pure-Python PLINK BED encoder (no
+  third-party generator dep). Seeded with `SEED = 20260526`;
+  byte-deterministic across runs. The generated `fixtures/` tree
+  (~280 KB) is checked in so the test doesn't depend on the
+  generator at run time.
+- **CI integration job** at `.github/workflows/ci.yml` —
+  downloads ADMIXTURE 1.4.0 Linux from
+  `dalexander.github.io/admixture` and plink2 alpha7 Linux x86 from
+  cog-genomics.org S3, then runs `pytest -m integration`. Job
+  depends on the unit-test matrix (only runs when the matrix is
+  green). Linux-only.
+
+### Test coverage
+
+- 10 new integration tests covering: cache directory layout, P/Q
+  matrix shapes, cluster_order vs .pop file consistency, Q-recovery
+  on each of 4 known-truth targets (pure-A, pure-C, 50/50 A+B,
+  three-way 40/40/20), full SNP count usage, and build idempotency
+  on the second `build_panel_cache` call.
+- Total test count: 262 unit (default `pytest`) + 10 integration
+  (opt-in `pytest -m integration`) = 272.
+
+### Documentation
+
+- `DEVELOPMENT.md` "Testing strategy" section expanded with the
+  new integration suite + local instructions for running it.
+- `CONTRIBUTING.md` "Local dev setup" notes that the integration
+  suite is optional.
+
 ## [1.1.1] - 2026-05-26
 
 Post-release hotfix addressing the 14 confirmed findings from the
@@ -212,7 +263,8 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/carstenerickson/admixture-cache/compare/v0.3.1...v1.0.0

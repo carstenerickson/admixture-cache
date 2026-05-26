@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "admixture-cache"
-version = "1.1.1"
+version = "1.2.0"
 description = "Precomputed-P supervised-ADMIXTURE projection cache: build slow once, project fast per target."
 readme = "README.md"
 license = { text = "MIT" }
@@ -88,7 +88,14 @@ admixture_cache = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-ra --strict-markers"
+# `-m "not integration"` keeps the default `pytest` invocation fast
+# — the integration suite requires real ADMIXTURE 1.4 + plink2
+# binaries and is gated to a dedicated CI job. Opt in via
+# `pytest -m integration`.
+addopts = "-ra --strict-markers -m 'not integration'"
+markers = [
+    "integration: end-to-end tests requiring real ADMIXTURE + plink2 binaries (Linux only)",
+]
 
 [tool.ruff]
 target-version = "py311"

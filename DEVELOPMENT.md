@@ -412,6 +412,24 @@ When adding a new module with non-trivial behavior, add a matching test file. Tr
 
 `TestLegacyManifestReparse` (`test_manifest.py`) feeds a hand-written v0.3.x-shape manifest (string `build_timestamp`, no `model_validator` enforcement) into `PanelCacheManifest.model_validate_json` to lock in the forward-compat claim about old caches loading on new code.
 
+### End-to-end integration suite
+
+`tests/integration/test_e2e_build_and_project.py` runs the full pipeline against REAL ADMIXTURE 1.4 + plink2 binaries — the only place where the library's contract with external tools is actually exercised. The fixture is a synthetic 3-cluster panel (90 samples × 2000 SNPs) plus 4 held-out targets with known admixture proportions; the test asserts that recovered Q vectors match truth within 0.10 absolute per-component (empirically ~0.03 on ADMIXTURE 1.3.0).
+
+Why it's gated behind a marker:
+
+- Requires both binaries on PATH (`admixture` from <https://dalexander.github.io/admixture/download.html>, `plink2` from <https://www.cog-genomics.org/plink/2.0/>). The marker skips the suite cleanly when either is missing.
+- Default `pytest` invocation excludes integration via `addopts = "-m 'not integration'"` in `pyproject.toml`. To run: `pytest -m integration`.
+- macOS dev environments can use ADMIXTURE 1.3.0 (the only macOS option); production CI uses 1.4.0 Linux (1.3.0 SIGSEGVs on modern kernels due to a removed vsyscall page).
+
+The fixture is deterministic (`SEED = 20260526` in `_generate_fixtures.py`) and checked into `tests/integration/fixtures/` (~280 KB). To regenerate (e.g., after changing the fixture's K or panel size):
+
+```bash
+cd tests/integration && python3 _generate_fixtures.py
+```
+
+CI runs the suite in a dedicated Linux job (`.github/workflows/ci.yml::integration`) that downloads both binaries from their canonical URLs before invoking `pytest -m integration`. The job depends on the unit-test matrix (only runs when all unit cells are green), so an integration failure points at the binary-interaction layer specifically, not a Python regression.
+
 ## Error handling
 
 Everything that can foreseeably fail raises `PanelCacheError` (`errors.py`). It's a single exception type so consumers can `try: ... except PanelCacheError:` and catch the whole library's foreseeable-failure surface at once. The library does NOT swallow unforeseen exceptions (`KeyboardInterrupt`, `MemoryError`, runner-internal `OSError`); those propagate as-is.

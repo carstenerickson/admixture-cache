@@ -23,10 +23,18 @@ End-to-end projection paths require **ADMIXTURE** (for `build`) and **plink2** (
 ## Running tests
 
 ```bash
-pytest                            # the full suite, ~3 s
+pytest                            # the unit suite (~3 s; default)
 pytest tests/unit/test_projection.py -v
 pytest -k "projection or manifest"
 ```
+
+There's also an **opt-in integration suite** under `tests/integration/` that runs the full pipeline against real ADMIXTURE 1.4 + plink2 binaries:
+
+```bash
+pytest -m integration             # ~3 s once binaries are installed
+```
+
+The integration suite skips cleanly when ADMIXTURE / plink2 aren't on PATH. To run locally: download `admixture` from <https://dalexander.github.io/admixture/download.html> (1.4 Linux preferred; 1.3 macOS works for dev with the same tolerance) and `plink2` from <https://www.cog-genomics.org/plink/2.0/>. CI installs both automatically in a dedicated Linux job. See `tests/integration/_generate_fixtures.py` if you need to regenerate the synthetic fixtures.
 
 The test layout under `tests/unit/`:
 

@@ -189,6 +189,9 @@ def build_panel_cache(
     seeds: list[int] | None = None,
     sd_threshold: float = 0.02,
     threads: int = 16,
+    # Per-restart timeout is enforced inside admixture_runner.run; see
+    # per_restart_timeout_seconds below. Parallel-restart config below.
+    max_parallel_restarts: int = 1,
     # Default 24 hr. Empirical: K=21 regional cache on AADR v66 HO
     # (27K samples × 580K SNPs) needs ~12-14 hr per restart to reach
     # delta<0.0001 (each QN/Block iter ~25 min; ~25 iters to converge).
@@ -253,70 +256,62 @@ def build_panel_cache(
             cache_dir, reason,
         )
 
-    # Run N restarts via ToolRunner
+    # Run N restarts via ToolRunner. Sequential by default
+    # (max_parallel_restarts=1); operator opts into parallel for ~N×
+    # wallclock reduction at the cost of N× peak memory + CPU contention
+    # (each ADMIXTURE process needs `threads` threads + ~16 GB RSS).
     t0 = time.time()
-    per_restart_results: list[dict] = []
-    for seed in seeds:
-        restart_dir = cache_dir / f"build_restart_{seed}"
-        restart_dir.mkdir(exist_ok=True)
-
-        # ADMIXTURE writes <bfile_stem>.<K>.{P,Q} in cwd.
-        # Stage the input BED triplet + .pop file in restart_dir so the
-        # outputs land alongside without clobbering between seeds.
-        import shutil as _shutil
-        for suffix in (".bed", ".bim", ".fam"):
-            src = panel_bed.with_suffix(suffix)
-            dst = restart_dir / f"panel{suffix}"
-            if not dst.exists():
-                _shutil.copy2(src, dst)
-        pop_dst = restart_dir / "panel.pop"
-        if not pop_dst.exists():
-            _shutil.copy2(panel_pop_file, pop_dst)
-
-        log_file = log_dir / f"restart_{seed}.out"
+    effective_parallelism = max(1, min(max_parallel_restarts, len(seeds)))
+    if effective_parallelism > 1:
         logger.info(
-            "build_panel_cache: starting restart seed=%d (K=%d, %d threads)",
-            seed, k, threads,
+            "build_panel_cache: running %d restarts in parallel "
+            "(max_parallel_restarts=%d, threads per restart=%d, "
+            "total subprocess threads=%d)",
+            effective_parallelism, max_parallel_restarts, threads,
+            effective_parallelism * threads,
         )
-        restart_t0 = time.time()
-        admixture_runner.run(
-            args=[
-                "--supervised",
-                f"-j{threads}",
-                f"-s{seed}",
-                "panel.bed",
-                str(k),
-            ],
-            cwd=restart_dir,
+
+    def _run_one_restart(seed: int) -> dict:
+        return _run_one_admixture_restart(
+            seed=seed,
+            panel_bed=panel_bed,
+            panel_pop_file=panel_pop_file,
+            k=k,
+            threads=threads,
+            cache_dir=cache_dir,
             log_dir=log_dir,
-            timeout_seconds=per_restart_timeout_seconds,
+            admixture_runner=admixture_runner,
+            per_restart_timeout_seconds=per_restart_timeout_seconds,
         )
-        restart_elapsed = time.time() - restart_t0
 
-        # Parse this restart's outputs
-        p_path = restart_dir / f"panel.{k}.P"
-        q_path = restart_dir / f"panel.{k}.Q"
-        if not p_path.exists() or not q_path.exists():
-            raise PopAutomationConfigError(
-                f"build_panel_cache: restart seed={seed} produced no "
-                f"output files (looked for {p_path} and {q_path}); "
-                f"see log_dir={log_dir}",
-            )
-        # Read LL from log
-        log_text = log_file.read_text() if log_file.exists() else ""
-        ll = _parse_admixture_loglikelihood(log_text)
+    per_restart_results: list[dict] = []
+    if effective_parallelism > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # ThreadPool is the right choice — each restart spawns a
+        # subprocess that releases the GIL (no Python-side contention).
+        with ThreadPoolExecutor(max_workers=effective_parallelism) as ex:
+            future_to_seed = {ex.submit(_run_one_restart, s): s for s in seeds}
+            for future in as_completed(future_to_seed):
+                seed = future_to_seed[future]
+                try:
+                    per_restart_results.append(future.result())
+                except Exception as exc:
+                    # Cancel pending restarts on first failure
+                    for other in future_to_seed:
+                        if not other.done():
+                            other.cancel()
+                    raise PopAutomationConfigError(
+                        f"build_panel_cache: parallel restart seed={seed} "
+                        f"failed: {exc}",
+                    ) from exc
+    else:
+        for seed in seeds:
+            per_restart_results.append(_run_one_restart(seed))
 
-        per_restart_results.append({
-            "seed": seed,
-            "p_path": p_path,
-            "q_path": q_path,
-            "ll": ll,
-            "wallclock_seconds": restart_elapsed,
-        })
-        logger.info(
-            "build_panel_cache: restart seed=%d finished in %.1fs, LL=%s",
-            seed, restart_elapsed, f"{ll:.3e}" if ll is not None else "?",
-        )
+    # Re-sort by seed for deterministic downstream ordering (parallel
+    # completion order is nondeterministic; we want the .json manifest
+    # + restart_sd.json to read out in seed order regardless).
+    per_restart_results.sort(key=lambda r: r["seed"])
 
     # Pick best LL restart
     with_ll = [r for r in per_restart_results if r["ll"] is not None]
@@ -423,6 +418,91 @@ def build_panel_cache(
         cache_dir, manifest.build_wallclock_seconds,
     )
     return manifest
+
+
+def _run_one_admixture_restart(
+    *,
+    seed: int,
+    panel_bed: Path,
+    panel_pop_file: Path,
+    k: int,
+    threads: int,
+    cache_dir: Path,
+    log_dir: Path,
+    admixture_runner: "ToolRunner",
+    per_restart_timeout_seconds: int,
+) -> dict:
+    """Run one supervised-ADMIXTURE restart at the given seed.
+
+    Stages a private restart_dir (cache_dir/build_restart_<seed>/),
+    copies panel.bed/bim/fam + panel.pop into it (so concurrent
+    restarts don't clobber each other's output files), runs
+    ``admixture --supervised -j<threads> -s<seed> panel.bed K``, and
+    returns the per-restart result dict for the multimodality + best-LL
+    selection downstream.
+
+    Safe to call concurrently with different seeds: each restart has
+    its own isolated working directory + log file.
+    """
+    import shutil as _shutil
+
+    restart_dir = cache_dir / f"build_restart_{seed}"
+    restart_dir.mkdir(exist_ok=True)
+
+    # ADMIXTURE writes <bfile_stem>.<K>.{P,Q} in cwd. Stage the input
+    # BED triplet + .pop file in restart_dir so the outputs land
+    # alongside without clobbering between concurrent seeds.
+    for suffix in (".bed", ".bim", ".fam"):
+        src = panel_bed.with_suffix(suffix)
+        dst = restart_dir / f"panel{suffix}"
+        if not dst.exists():
+            _shutil.copy2(src, dst)
+    pop_dst = restart_dir / "panel.pop"
+    if not pop_dst.exists():
+        _shutil.copy2(panel_pop_file, pop_dst)
+
+    log_file = log_dir / f"restart_{seed}.out"
+    logger.info(
+        "build_panel_cache: starting restart seed=%d (K=%d, %d threads)",
+        seed, k, threads,
+    )
+    restart_t0 = time.time()
+    admixture_runner.run(
+        args=[
+            "--supervised",
+            f"-j{threads}",
+            f"-s{seed}",
+            "panel.bed",
+            str(k),
+        ],
+        cwd=restart_dir,
+        log_dir=log_dir,
+        timeout_seconds=per_restart_timeout_seconds,
+    )
+    restart_elapsed = time.time() - restart_t0
+
+    p_path = restart_dir / f"panel.{k}.P"
+    q_path = restart_dir / f"panel.{k}.Q"
+    if not p_path.exists() or not q_path.exists():
+        raise PopAutomationConfigError(
+            f"_run_one_admixture_restart: restart seed={seed} produced "
+            f"no output files (looked for {p_path} and {q_path}); see "
+            f"log_dir={log_dir}",
+        )
+
+    log_text = log_file.read_text() if log_file.exists() else ""
+    ll = _parse_admixture_loglikelihood(log_text)
+    logger.info(
+        "build_panel_cache: restart seed=%d finished in %.1fs, LL=%s",
+        seed, restart_elapsed, f"{ll:.3e}" if ll is not None else "?",
+    )
+    return {
+        "seed": seed,
+        "p_path": p_path,
+        "q_path": q_path,
+        "ll": ll,
+        "wallclock_seconds": restart_elapsed,
+    }
 
 
 def _parse_admixture_loglikelihood(log_text: str) -> float | None:

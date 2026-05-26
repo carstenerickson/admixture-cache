@@ -42,7 +42,7 @@ from admixture_cache._core import (
 from admixture_cache.errors import PanelCacheError
 from admixture_cache.runner import ToolRunner
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Public API — cache build (slow, one-time)

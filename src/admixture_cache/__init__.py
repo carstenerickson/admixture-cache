@@ -19,30 +19,32 @@ Two phases, two APIs:
      likelihood.
 
 The math is validated to <1e-5 absolute Q-vector match against stock
-ADMIXTURE on real workloads (15K × 850K matrix; see the project's
-Phase 0 validation report).
+ADMIXTURE on representative panels (15K samples × 850K SNPs at K=4).
 """
 
 from __future__ import annotations
 
-from admixture_cache._core import (
-    PanelCacheManifest,
-    ProjectionResult,
+from admixture_cache.alignment import (
     align_target_to_panel_bim,
-    build_panel_cache,
     extract_target_dosage_via_plink2,
-    ld_prune_panel,
+)
+from admixture_cache.builder import build_panel_cache, ld_prune_panel
+from admixture_cache.errors import PanelCacheError, PopAutomationConfigError
+from admixture_cache.io import (
     load_cache_manifest,
     load_cached_p,
-    numpy_supervised_projection,
-    project_target,
     sha256_file,
     verify_cache_matches_current_config,
 )
-from admixture_cache.errors import PanelCacheError
+from admixture_cache.manifest import PanelCacheManifest
+from admixture_cache.orchestration import project_target
+from admixture_cache.projection import (
+    ProjectionResult,
+    numpy_supervised_projection,
+)
 from admixture_cache.runner import ToolRunner
 
-__version__ = "0.3.1"
+__version__ = "1.0.0"
 
 __all__ = [
     # Public API — cache build (slow, one-time)
@@ -64,6 +66,10 @@ __all__ = [
     "ProjectionResult",
     # Error type
     "PanelCacheError",
+    # Back-compat alias for the upstream source-of-extraction; kept
+    # importable for callers mid-migration. Identical to
+    # PanelCacheError; safe to delete once no consumer relies on it.
+    "PopAutomationConfigError",
     # Runner Protocol (for consumers' type hints)
     "ToolRunner",
     # Version

@@ -1,0 +1,126 @@
+name: Release
+
+# Triggered when a `v*` tag is pushed (e.g. `v1.0.0`, `v1.0.0rc1`).
+# Builds the sdist + wheel, runs the full test suite against the built wheel
+# in a clean environment, and publishes to PyPI via OIDC trusted publishing
+# (no API token needed once the project is configured at
+# https://pypi.org/manage/account/publishing/).
+#
+# Manual dispatch is supported for dry-runs (build + test only, no publish).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Opt JS-based actions in to Node.js 24 ahead of GitHub's June 2026 forced
+# migration. Affects upload-artifact@v4 / download-artifact@v4 (still on
+# Node 20 as of v4); checkout@v5 / setup-python@v6 are already on Node 24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build deps
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: twine check --strict dist/*
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  smoke-test-wheel:
+    name: Smoke-test built wheel (${{ matrix.os }} / Python ${{ matrix.python }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install built wheel into a clean environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          WHEEL=$(ls dist/*.whl)
+          python -m pip install "$WHEEL"
+          python -m pip install pytest pytest-cov
+
+      - name: Verify CLI starts
+        run: |
+          admixture-cache --version
+          admixture-cache --help > /dev/null
+
+      - name: Run unit tests against the installed wheel
+        run: pytest tests/unit/ -q
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, smoke-test-wheel]
+    # Only publish for tag pushes, not manual workflow_dispatch (so we can
+    # dry-run the build+test path without releasing).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/admixture-cache
+    permissions:
+      # OIDC trusted publishing needs id-token: write. No long-lived API token
+      # in repo secrets; PyPI verifies the GitHub Actions OIDC claim.
+      # Configure once at https://pypi.org/manage/account/publishing/ with:
+      #   PyPI project name: admixture-cache
+      #   Owner: carstenerickson
+      #   Repository: admixture-cache
+      #   Workflow filename: release.yml
+      #   Environment name: pypi
+      id-token: write
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

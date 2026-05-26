@@ -66,13 +66,13 @@ graph TD
     projection --> orchestration
     alignment --> orchestration
 
+    io --> cli
     builder --> cli
     orchestration --> cli
 
     runner -. TYPE_CHECKING .-> alignment
     runner -. TYPE_CHECKING .-> builder
     runner -. TYPE_CHECKING .-> orchestration
-    runner --> cli
 
     classDef root fill:#e8e8e8,stroke:#444
     class errors,runner,manifest root
@@ -95,9 +95,10 @@ flowchart TD
     subgraph Phase1["Phase 1: build (slow, one-time per cache)"]
         direction TB
         BPC[build_panel_cache] --> RUN[N × _run_one_admixture_restart<br/>via admixture_runner.run]
-        RUN --> MULTI[multimodality check<br/>per-cluster restart_sd<br/>vs sd_threshold]
-        MULTI --> BEST[best-LL selection<br/>tie-break: lowest seed]
-        BEST --> WRITE[atomic manifest write<br/>tempfile + os.replace]
+        RUN --> BEST[best-LL selection<br/>tie-break: lowest seed]
+        BEST --> MULTI{multimodality gate<br/>max per-cluster SD<br/>≤ sd_threshold?}
+        MULTI -->|pass| WRITE[atomic manifest write<br/>tempfile + os.replace]
+        MULTI -->|fail| RAISE[raise PanelCacheError<br/>no manifest written]
     end
 
     subgraph Cache["cache_dir/ — sealed by manifest.json"]

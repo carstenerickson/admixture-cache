@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - 2026-05-26
 
 First PyPI release. Bundles the v1.0 publication-readiness pass with
-the parallel-restart polish work (the "five small fixes" that the
-W_Eurasia in-flight build surfaced). API-additive only; no public API
+the parallel-restart polish work that surfaced from running real
+production builds on cloud VMs. API-additive only; no public API
 breaks relative to v0.3.1.
 
 ### Added — CLI + packaging
@@ -37,7 +37,7 @@ breaks relative to v0.3.1.
 - **`_core.py` split into six focused modules.** The 935-LOC `_core.py` extracted from the source project has been split into `projection.py` (NumPy SLSQP), `builder.py` (`build_panel_cache` + `_run_one_admixture_restart` + LD-pruning), `manifest.py` (the `PanelCacheManifest` pydantic model), `alignment.py` (target-to-panel plink2 helpers), `io.py` (SHA + manifest load + cache verification), and `orchestration.py` (`project_target` end-to-end wrapper). Public API surface unchanged — all 14 symbols still importable as `from admixture_cache import …`.
 - **`_run_one_admixture_restart` stages the BED triplet as symlinks.** Each restart_dir's `panel.bed` / `panel.bim` / `panel.fam` is a symlink to the source file rather than a physical copy. Concurrent restarts now share a single inode for the input, so the OS page cache serves all N processes from one buffered copy of `panel.bed` — meaningful DRAM-bandwidth relief at N≥3 plus ~17 GiB disk saved on a 5-restart regional build. The `.pop` file stays a real copy (it's tiny and a writable file simplifies one-off debugging).
 - **`load_cache_manifest` wraps pydantic `ValidationError` as `PanelCacheError`.** A corrupt or schema-stale `manifest.json` previously leaked `pydantic.ValidationError` past the documented exception type; consumers now see a single error class. Bottom-of-stack pydantic message preserved in the exception chain (`from exc`).
-- **Library no longer references the source project in docstrings, error messages, or comments.** `_core.py`'s extraction-history annotations ("Phase 0b validated", real-data validation source names, internal bug-tracker IDs, consumer module paths) have been replaced with neutral technical descriptions. Error messages that pointed at the source project's CLI now point at `admixture_cache.build_panel_cache`.
+- **Library no longer references the source project in docstrings, error messages, or comments.** `_core.py`'s extraction-history annotations (validation-history markers, source-data references, internal bug-tracker IDs, consumer module paths) have been replaced with neutral technical descriptions. Error messages that pointed at the source project's CLI now point at `admixture_cache.build_panel_cache`.
 - **`build_panel_cache` docstring documents the memory-bandwidth tradeoff explicitly.** The empirical "5 × threads=3 ≈ 2 × threads=8 in wallclock but 2.5× more peak memory" observation is now captured next to the `max_parallel_restarts` parameter, so operators picking a value have the numbers without having to spelunk a separate workplan.
 
 ### Fixed

@@ -1223,7 +1223,7 @@ class TestAutoMaxParallelRestarts:
             (8, 8, 5, 1),    # 8 // 16 = 0 → 1
             # 16 cores — the empirical sweet-spot bucket
             (16, 1, 5, 5),   # 16 // 2 = 8, capped at 5 seeds
-            (16, 3, 5, 2),   # 16 // 6 = 2 — matches the W_Eurasia recommendation
+            (16, 3, 5, 2),   # 16 // 6 = 2 — matches the empirical sweet spot on 16-core / K=4
             (16, 8, 5, 1),   # 16 // 16 = 1
             # 32 cores
             (32, 1, 5, 5),   # 32 // 2 = 16, capped

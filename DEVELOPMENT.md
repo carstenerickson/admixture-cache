@@ -37,75 +37,97 @@ src/admixture_cache/
 | `orchestration.py` | stdlib + numpy + `errors` + `alignment` + `io` + `projection` + `runner` (TYPE_CHECKING) |
 | `cli.py` | everything (it's the integration point) |
 
-The dependency graph is acyclic. Reading top-down (each module depends only on what's above it):
+The dependency graph is acyclic:
 
-- **Layer 0 (roots, no internal deps):** `errors`, `runner`, `manifest`
-- **Layer 1 (depend only on roots):** `projection` (→ errors), `alignment` (→ errors), `io` (→ errors, manifest)
-- **Layer 2 (compose layer 1):**
-  - `builder` → errors, manifest, io
-  - `orchestration` → errors, projection, alignment, io
-- **Layer 3 (integration point):** `cli` → everything
+```mermaid
+graph TD
+    errors[errors.py]
+    runner[runner.py]
+    manifest[manifest.py]
+    projection[projection.py]
+    alignment[alignment.py]
+    io[io.py]
+    builder[builder.py]
+    orchestration[orchestration.py]
+    cli[cli.py]
+
+    errors --> projection
+    errors --> alignment
+    errors --> io
+    errors --> builder
+    errors --> orchestration
+
+    manifest --> io
+    manifest --> builder
+
+    io --> builder
+    io --> orchestration
+
+    projection --> orchestration
+    alignment --> orchestration
+
+    builder --> cli
+    orchestration --> cli
+
+    runner -. TYPE_CHECKING .-> alignment
+    runner -. TYPE_CHECKING .-> builder
+    runner -. TYPE_CHECKING .-> orchestration
+    runner --> cli
+
+    classDef root fill:#e8e8e8,stroke:#444
+    class errors,runner,manifest root
+    classDef leaf fill:#e0f0e0,stroke:#444
+    class cli leaf
+```
 
 Key observations:
 
-- `builder` and `orchestration` are siblings at layer 2 — neither imports the other. Phase 1 (build) and phase 2 (project) don't share a code path other than the shared `io` / `manifest` modules below them.
-- `alignment` and `projection` also don't import each other; `orchestration` is the first place they meet.
-- `runner` is imported only under `TYPE_CHECKING` in the implementation modules. The injected runner objects are used structurally at runtime without needing the Protocol class itself.
+- **Roots** (`errors`, `runner`, `manifest`) — no internal dependencies.
+- `builder` and `orchestration` are siblings — neither imports the other. Phase 1 (build) and phase 2 (project) only share the `io` / `manifest` modules below them.
+- `alignment` and `projection` don't import each other; `orchestration` is the first place they meet.
+- `runner` is imported only under `TYPE_CHECKING` in the implementation modules (dotted edges above). The injected runner objects are used structurally at runtime without needing the Protocol class itself.
 - No tooling enforces this layering; it's a maintenance convention. Worth a `ruff` `flake8-tidy-imports` rule or similar if someone wants to lock it in.
 
 ## Two-phase data flow
 
-```
-                  ┌─────────────────────────────────────────┐
-                  │  Phase 1 (operator, slow, one-time)     │
-                  │  build_panel_cache(panel, K, ...)       │
-                  │   │                                     │
-                  │   ├─ N × _run_one_admixture_restart     │
-                  │   │   └─ admixture_runner.run([...])    │
-                  │   ├─ multimodality validation           │
-                  │   │   (per-cluster restart_sd vs        │
-                  │   │    sd_threshold)                    │
-                  │   ├─ best-LL selection                  │
-                  │   └─ atomic manifest write              │
-                  │                                         │
-                  │       ↓ writes ↓                        │
-                  │                                         │
-                  │  cache_dir/                             │
-                  │  ├── panel.K.P        ← P matrix        │
-                  │  ├── panel.K.Q        ← non-target Q    │
-                  │  ├── panel.bim        ← alignment ref   │
-                  │  ├── restart_sd.json  ← per-cluster SD  │
-                  │  ├── cluster_order.json ← K → name map  │
-                  │  ├── manifest.json    ← SEALING ARTIFACT│
-                  │  └── build_logs/      ← per-restart out │
-                  └─────────────────────────────────────────┘
-                              │
-                              │ cache reused unchanged
-                              ↓
-                  ┌─────────────────────────────────────────┐
-                  │  Phase 2 (consumer, fast, every target) │
-                  │  project_target(target, cache_dir, ...) │
-                  │   │                                     │
-                  │   ├─ load_cache_manifest                │
-                  │   ├─ align_target_to_panel_bim          │
-                  │   │   (plink2 --extract panel.bim       │
-                  │   │    + --alt1-allele for REF/ALT)     │
-                  │   ├─ extract_target_dosage_via_plink2   │
-                  │   │   (plink2 --recode A + pandas)      │
-                  │   ├─ load_cached_p                      │
-                  │   └─ numpy_supervised_projection        │
-                  │       (scipy SLSQP on binomial L)       │
-                  │                                         │
-                  │       ↓ returns ↓                       │
-                  │                                         │
-                  │  ProjectionResult                       │
-                  │  ├── target_q          (shape (K,))     │
-                  │  ├── cluster_order     (K names)        │
-                  │  ├── panel_stability_max_sd             │
-                  │  ├── n_snps_used                        │
-                  │  ├── optimization_iterations            │
-                  │  └── converged                          │
-                  └─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Phase1["Phase 1: build (slow, one-time per cache)"]
+        direction TB
+        BPC[build_panel_cache] --> RUN[N × _run_one_admixture_restart<br/>via admixture_runner.run]
+        RUN --> MULTI[multimodality check<br/>per-cluster restart_sd<br/>vs sd_threshold]
+        MULTI --> BEST[best-LL selection<br/>tie-break: lowest seed]
+        BEST --> WRITE[atomic manifest write<br/>tempfile + os.replace]
+    end
+
+    subgraph Cache["cache_dir/ — sealed by manifest.json"]
+        direction LR
+        PFILE["panel.K.P"]
+        QFILE["panel.K.Q"]
+        BIM["panel.bim"]
+        SDJ["restart_sd.json"]
+        COJ["cluster_order.json"]
+        MAN["manifest.json<br/>SEALING ARTIFACT"]
+        LOGS["build_logs/<br/>restart_seed.out"]
+    end
+
+    subgraph Phase2["Phase 2: project (fast, every target)"]
+        direction TB
+        PT[project_target] --> LM[load_cache_manifest]
+        LM --> AL["align_target_to_panel_bim<br/>plink2 --extract panel.bim<br/>+ --alt1-allele for REF/ALT"]
+        AL --> EX["extract_target_dosage_via_plink2<br/>plink2 --recode A + pandas"]
+        EX --> LP[load_cached_p]
+        LP --> NSP["numpy_supervised_projection<br/>scipy SLSQP on binomial L"]
+        NSP --> PR["ProjectionResult<br/>target_q, cluster_order,<br/>panel_stability_max_sd,<br/>n_snps_used, iterations, converged"]
+    end
+
+    WRITE --> Cache
+    Cache -.cache reused unchanged.-> LM
+
+    classDef seal fill:#fff4cc,stroke:#cc9900
+    class MAN seal
+    classDef result fill:#e0f0e0,stroke:#444
+    class PR result
 ```
 
 Both phases are reachable two ways: directly from Python (`from admixture_cache import build_panel_cache`) or via the CLI (`admixture-cache build` / `admixture-cache project`). The CLI is the integration point — it instantiates a default `SubprocessToolRunner` and forwards argparse-validated kwargs to the library functions.
@@ -201,7 +223,34 @@ The reference implementation `SubprocessToolRunner` lives in `cli.py`, not `runn
 
 ## The runner-extension dispatch story
 
-The library extended the `ToolRunner` Protocol in v1.0.0 with two optional kwargs (`log_name`, `pid_callback`). Each is detected at call time via `inspect.signature` (`builder._runner_supports`). If the runner accepts the kwarg directly OR has a `VAR_KEYWORD` (`**kwargs`) parameter, the dispatcher forwards the kwarg; otherwise it's silently dropped.
+The library extended the `ToolRunner` Protocol in v1.0.0 with two optional kwargs (`log_name`, `pid_callback`). Each is detected at call time via `inspect.signature` (`builder._runner_supports`):
+
+```mermaid
+flowchart LR
+    Start([_call_runner called<br/>with log_name + pid_callback])
+    Inspect[inspect.signature<br/>of runner.run]
+    HasNamed{kwarg name in<br/>signature parameters?}
+    HasVar{any VAR_KEYWORD<br/>parameter?}
+    Forward[forward kwarg to runner]
+    Drop[drop kwarg silently]
+    InspectFails[returns False:<br/>signature inspection<br/>raised TypeError/ValueError]
+
+    Start --> Inspect
+    Inspect -->|signature ok| HasNamed
+    Inspect -->|signature raises| InspectFails
+    InspectFails --> Drop
+    HasNamed -->|yes| Forward
+    HasNamed -->|no| HasVar
+    HasVar -->|yes| Forward
+    HasVar -->|no| Drop
+
+    classDef ok fill:#e0f0e0,stroke:#444
+    class Forward ok
+    classDef warn fill:#fce4d6,stroke:#aa4400
+    class Drop,InspectFails warn
+```
+
+The check runs ONCE per `_call_runner` invocation, separately for each optional kwarg. If the runner's `run` method accepts the kwarg directly OR has a `VAR_KEYWORD` (`**kwargs`) parameter, the dispatcher forwards it; otherwise it's silently dropped.
 
 The dispatcher is `builder._call_runner`. It's called from:
 
@@ -230,12 +279,42 @@ The canonical explanation lives in `build_panel_cache`'s docstring + `_auto_max_
 
 ## Cancellation contract
 
-When one restart in a parallel build fails, the other in-flight subprocesses must be terminated promptly — otherwise the build hangs for `per_restart_timeout_seconds` (default 86400 = 24 h) waiting for them to finish naturally. The flow:
+When one restart in a parallel build fails, the other in-flight subprocesses must be terminated promptly — otherwise the build hangs for `per_restart_timeout_seconds` (default 86400 = 24 h) waiting for them to finish naturally.
 
-1. `SubprocessToolRunner` spawns the child with `start_new_session=True`, which puts the child in a NEW session + process group. The child's pgid equals its pid (and is NOT the parent's pgid).
-2. The runner's `pid_callback(proc.pid)` registers the PID in the build's `pids` dict (mutex-protected for thread safety).
-3. On first-failure, `_cancel_inflight` reads the registered PIDs and signals each via `os.killpg(os.getpgid(pid), SIGTERM)` — signaling the child's PROCESS GROUP, not just the bare PID.
-4. The executor shuts down with `wait=False, cancel_futures=True` so not-yet-started workers are cancelled and running workers receive their SIGTERM.
+```mermaid
+sequenceDiagram
+    participant BPC as build_panel_cache
+    participant Ex as ThreadPoolExecutor
+    participant W2 as Worker thread (seed=2)
+    participant SR as SubprocessToolRunner
+    participant Ch as ADMIXTURE subprocess
+    participant W1 as Worker thread (seed=1)
+
+    BPC->>Ex: submit seed=1, 2, 3, ...
+    Ex->>W1: start
+    Ex->>W2: start
+
+    par seed=1 happy path
+        W1->>SR: run(args, log_name, pid_callback)
+        SR->>Ch: Popen(..., start_new_session=True)
+        SR->>W1: pid_callback(pid)
+        W1->>BPC: pids[1] = pid (mutex-protected)
+    and seed=2 fails
+        W2->>SR: run(...)
+        SR->>SR: subprocess crashes / runner raises
+        W2-->>Ex: future.result() raises
+    end
+
+    Ex->>BPC: as_completed yields W2's future first
+    BPC->>BPC: _cancel_inflight([1, 3, ...])
+    Note over BPC: For each tracked PID:<br/>pgid = os.getpgid(pid)<br/>if pgid == os.getpgrp():<br/>  fall back to os.kill(pid) + warn<br/>else:<br/>  os.killpg(pgid, SIGTERM)
+    BPC->>Ch: os.killpg(pgid, SIGTERM)
+    Ch-->>SR: exits with signal
+    SR-->>W1: returns / raises
+
+    BPC->>Ex: shutdown(wait=False, cancel_futures=True)
+    BPC->>BPC: raise PanelCacheError(seed=2 failed)
+```
 
 ### The pgid safety check
 

@@ -113,8 +113,10 @@ def extract_target_dosage_via_plink2(
             f"extract_target_dosage_via_plink2: expected 1 sample in "
             f"{raw_path}, got {raw.shape[0]}",
         )
-    # First 6 columns are FID IID PAT MAT SEX PHENOTYPE; rest are dosages
-    return raw.iloc[0, 6:].to_numpy().astype(np.float64)
+    # First 6 columns are FID IID PAT MAT SEX PHENOTYPE; rest are dosages.
+    # np.asarray() guarantees a typed ndarray result even when pandas
+    # types resolve to Any (strict mypy in CI doesn't ship pandas-stubs).
+    return np.asarray(raw.iloc[0, 6:].to_numpy()).astype(np.float64)
 
 
 __all__ = ["align_target_to_panel_bim", "extract_target_dosage_via_plink2"]

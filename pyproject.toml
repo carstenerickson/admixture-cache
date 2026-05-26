@@ -41,6 +41,11 @@ dependencies = [
     "numpy>=1.26,<3",
     "scipy>=1.11,<2",
     "pydantic>=2.5,<3",
+    # pandas is used by `extract_target_dosage_via_plink2` to parse
+    # plink2 `--recode A` text output. Imported inline (not at module
+    # load) so the import cost only hits the projection hot path,
+    # but it IS required for the default project_target flow.
+    "pandas>=2.0,<3",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +54,10 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "mypy>=1.11",
+    # pandas-stubs gives mypy proper types for the pandas calls in
+    # alignment.py — without it strict mode reports `no-any-return`
+    # on the DataFrame-to-ndarray conversion.
+    "pandas-stubs>=2.0",
     "build>=1.2",
     "twine>=5.0",
 ]

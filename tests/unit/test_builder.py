@@ -971,21 +971,29 @@ class _FakePlink2Runner:
         cwd: Path,
         log_dir: Path,
         timeout_seconds: int = 3600,
+        log_name: str | None = None,
     ) -> object:
+        from admixture_cache._paths import append_suffix
+
         self.calls.append(list(args))
         out_prefix = Path(args[args.index("--out") + 1])
         if "--indep-pairwise" in args and self.emit_prune_in:
-            out_prefix.with_suffix(".prune.in").write_text(
+            append_suffix(out_prefix, ".prune.in").write_text(
                 "\n".join(self.kept_variants) + "\n",
             )
         if "--extract" in args and self.emit_pruned_bed:
-            out_prefix.with_suffix(".bed").write_bytes(b"\x6c\x1b\x01")
-            # also emit a matching .bim for diagnostics
-            out_prefix.with_suffix(".bim").write_text(
+            # Real plink2 --make-bed emits the full triplet
+            # (.bed/.bim/.fam); mirror that so v1.1.1's triplet-
+            # completeness check in ld_prune_panel doesn't trip.
+            append_suffix(out_prefix, ".bed").write_bytes(b"\x6c\x1b\x01")
+            append_suffix(out_prefix, ".bim").write_text(
                 "\n".join(
                     f"1\t{v}\t0\t{i+1000}\tA\tG"
                     for i, v in enumerate(self.kept_variants)
                 ) + "\n",
+            )
+            append_suffix(out_prefix, ".fam").write_text(
+                "F\tI\t0\t0\t0\t-9\n",
             )
         return None
 
@@ -1053,7 +1061,9 @@ class TestLdPrunePanel:
     def test_missing_pruned_bed_raises(self, tmp_path: Path) -> None:
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)
         runner = _FakePlink2Runner(emit_pruned_bed=False)
-        with pytest.raises(PanelCacheError, match="no output"):
+        # v1.1.1: the post-plink2 validation now checks the full BED
+        # triplet, so the error message names the missing siblings.
+        with pytest.raises(PanelCacheError, match="incomplete BED triplet"):
             ld_prune_panel(
                 panel_bed=panel_bed,
                 output_prefix=tmp_path / "pruned",
@@ -1261,18 +1271,24 @@ class TestNumaPinning:
     numactl, single-socket boxes, or sequential execution."""
 
     def test_numa_disabled_by_default_no_argv_prefix(self, tmp_path: Path) -> None:
-        """Default `numa_node_per_restart=False` → no argv_prefix forwarded."""
-        observed: list[list[str] | None] = []
+        """Default `numa_node_per_restart=False` → dispatcher must NOT
+        forward the `argv_prefix` kwarg at all (not even as `None`).
+        This tightens the assertion to verify the kwarg is omitted
+        from the call, distinguishing 'kwarg dropped because None' from
+        'kwarg dropped because runner doesn't support it'."""
+        observed_kwargs: list[set[str]] = []
 
-        class _ArgvObservingRunner:
-            def run(
-                self, *, args: list[str], cwd: Path, log_dir: Path,
-                timeout_seconds: int = 86400,
-                log_name: str | None = None,
-                pid_callback: Any = None,
-                argv_prefix: list[str] | None = None,
-            ) -> object:
-                observed.append(argv_prefix)
+        class _KwargsCapturingRunner:
+            """Captures the exact set of kwargs received, not just
+            their values. A None forwarded explicitly would show up
+            in the kwargs dict; an omitted kwarg would not."""
+
+            def run(self, **kwargs: Any) -> object:
+                observed_kwargs.append(set(kwargs.keys()))
+                args = kwargs["args"]
+                cwd = kwargs["cwd"]
+                log_dir = kwargs["log_dir"]
+                log_name = kwargs.get("log_name")
                 seed = next(
                     int(a[2:]) for a in args
                     if a.startswith("-s") and a[2:].isdigit()
@@ -1298,7 +1314,7 @@ class TestNumaPinning:
             clusters_yaml=yaml,
             k=2,
             cache_dir=cache_dir,
-            admixture_runner=_ArgvObservingRunner(),
+            admixture_runner=_KwargsCapturingRunner(),
             track="regional",
             panel_id="p1",
             panel_version="v1",
@@ -1308,8 +1324,13 @@ class TestNumaPinning:
             sd_threshold=10.0,
             max_parallel_restarts=2,
         )
-        # All calls saw argv_prefix=None — no NUMA pinning requested.
-        assert observed == [None, None]
+        # The kwarg `argv_prefix` must not appear in any of the
+        # observed call signatures — the dispatcher's `if argv_prefix
+        # is not None` guard means it's never explicitly passed.
+        for call_kwargs in observed_kwargs:
+            assert "argv_prefix" not in call_kwargs, (
+                f"argv_prefix forwarded when None: {call_kwargs}"
+            )
 
     def test_numa_enabled_no_numactl_falls_back_silently(
         self, tmp_path: Path,
@@ -1497,6 +1518,335 @@ class TestNumaPinning:
             instance = path_cls.return_value
             instance.is_dir.return_value = False
             assert _detect_numa_nodes() == 1
+
+    def test_detect_numa_nodes_ignores_non_dir_entries(
+        self, tmp_path: Path,
+    ) -> None:
+        """v1.1.1 regression: `_detect_numa_nodes` must filter for
+        DIRECTORIES named `nodeN` (where N is digits). Files / symlinks
+        starting with 'node' (e.g., a `node_list` file in a kernel
+        patch or container overlay) should NOT inflate the count."""
+        from unittest.mock import patch as _patch
+
+        from admixture_cache.builder import _detect_numa_nodes
+
+        # Build a fake sysfs-like layout under tmp_path.
+        sysfs = tmp_path / "node"
+        sysfs.mkdir()
+        (sysfs / "node0").mkdir()
+        (sysfs / "node1").mkdir()
+        # Decoys: file starting with 'node' + dir starting with 'node'
+        # but not followed by digits.
+        (sysfs / "node_list").write_text("0-1")
+        (sysfs / "nodeinfo").mkdir()
+
+        with _patch("admixture_cache.builder.Path", return_value=sysfs):
+            assert _detect_numa_nodes() == 2
+
+    def test_numa_pinning_warns_when_runner_lacks_argv_prefix(
+        self, tmp_path: Path,
+    ) -> None:
+        """v1.1.1 regression: when `numa_node_per_restart=True` but the
+        runner doesn't support `argv_prefix` (and isn't a **kwargs
+        forwarder), the build must WARN and degrade to non-pinned
+        execution — not silently advertise NUMA pinning while
+        dropping the kwarg."""
+        from unittest.mock import patch as _patch
+
+        observed_kwargs: list[set[str]] = []
+
+        class _V10EraRunner:
+            """log_name + pid_callback present; argv_prefix absent.
+            Models a custom runner upgraded for v1.0 but not v1.1."""
+
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+            ) -> object:
+                # Record what we WERE called with (vs the v1.0 protocol).
+                observed_kwargs.append({
+                    "log_name", "pid_callback",  # always implied
+                })
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+
+        with (
+            _patch("admixture_cache.builder.shutil.which",
+                   return_value="/usr/bin/numactl"),
+            _patch("admixture_cache.builder._detect_numa_nodes",
+                   return_value=2),
+            self._capture_warning_log() as warnings_collected,
+        ):
+            build_panel_cache(
+                    panel_bed=panel_bed,
+                    panel_pop_file=pop,
+                    clusters_yaml=yaml,
+                    k=2,
+                    cache_dir=cache_dir,
+                    admixture_runner=_V10EraRunner(),
+                    track="regional",
+                    panel_id="p1",
+                    panel_version="v1",
+                    admixture_version="1.4.0",
+                    seeds=[1, 2],
+                    threads=1,
+                    sd_threshold=10.0,
+                    max_parallel_restarts=2,
+                    numa_node_per_restart=True,
+                )
+
+        # The warning must have been emitted, naming argv_prefix.
+        assert any("argv_prefix" in msg for msg in warnings_collected), (
+            f"expected an argv_prefix warning; got: {warnings_collected}"
+        )
+
+    @contextlib.contextmanager
+    def _capture_warning_log(self) -> Any:
+        """Capture WARNING-level log messages emitted during the
+        context body. Used to verify the NUMA-degradation warning."""
+        import logging
+
+        collected: list[str] = []
+        handler = logging.Handler()
+
+        def handle(record: logging.LogRecord) -> None:
+            if record.levelno >= logging.WARNING:
+                collected.append(record.getMessage())
+
+        handler.emit = handle  # type: ignore[method-assign]
+        root = logging.getLogger("admixture_cache.builder")
+        root.addHandler(handler)
+        prior_level = root.level
+        root.setLevel(logging.WARNING)
+        try:
+            yield collected
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(prior_level)
+
+    def test_numa_pinning_workers_dont_block_when_nodes_lt_parallelism(
+        self, tmp_path: Path,
+    ) -> None:
+        """v1.1.1 second-pass regression: when n_nodes < effective_parallelism,
+        no worker may block on `numa_node_pool.get()`. The pre-fix code
+        sized the queue to `numa_n_nodes`, so excess workers blocked
+        before registering their PID — and on first-failure could
+        unblock AFTER cancellation and spawn unkillable subprocesses.
+
+        Test: 2 NUMA nodes, max_parallel_restarts=4. All 4 workers must
+        get a node immediately; some share. Build completes; warning
+        is emitted naming the partial-pinning condition."""
+        from unittest.mock import patch as _patch
+
+        node_assignments: dict[int, int] = {}
+
+        class _NodeRecordingRunner:
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+                argv_prefix: list[str] | None = None,
+            ) -> object:
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                node = -1
+                if argv_prefix is not None:
+                    for tok in argv_prefix:
+                        if tok.startswith("--membind="):
+                            node = int(tok.split("=")[1])
+                            break
+                node_assignments[seed] = node
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+
+        with (
+            _patch("admixture_cache.builder.shutil.which",
+                   return_value="/usr/bin/numactl"),
+            _patch("admixture_cache.builder._detect_numa_nodes",
+                   return_value=2),
+            self._capture_warning_log() as warnings_collected,
+        ):
+            build_panel_cache(
+                panel_bed=panel_bed,
+                panel_pop_file=pop,
+                clusters_yaml=yaml,
+                k=2,
+                cache_dir=cache_dir,
+                admixture_runner=_NodeRecordingRunner(),
+                track="regional",
+                panel_id="p1",
+                panel_version="v1",
+                admixture_version="1.4.0",
+                seeds=[1, 2, 3, 4],
+                threads=1,
+                sd_threshold=10.0,
+                max_parallel_restarts=4,
+                numa_node_per_restart=True,
+            )
+
+        # All 4 seeds got a node assignment (no blocked workers).
+        assert set(node_assignments) == {1, 2, 3, 4}
+        for seed, node in node_assignments.items():
+            assert node in (0, 1), f"seed {seed} got unexpected node {node}"
+
+        # Warning emitted naming the partial-pinning condition.
+        assert any(
+            "partial pinning" in msg.lower() or "share a node" in msg.lower()
+            for msg in warnings_collected
+        ), f"expected partial-pinning warning; got: {warnings_collected}"
+
+    def test_numa_pinning_slot_based_assignment(self, tmp_path: Path) -> None:
+        """v1.1.1 regression: with seeds > effective_parallelism, the
+        NUMA assignment must be slot-based (not seed-ordinal). Each
+        in-flight worker holds exactly one node; finished worker
+        releases the node before the next worker claims it. No two
+        in-flight restarts share a node."""
+        import threading
+        import time
+        from unittest.mock import patch as _patch
+
+        node_history: list[tuple[int, str, int]] = []
+        node_history_lock = threading.Lock()
+        # Map seed → start barrier so we can synchronize concurrent
+        # in-flight to verify uniqueness.
+        live_seeds: set[int] = set()
+        live_seeds_lock = threading.Lock()
+
+        class _SlowRunner:
+            """Records which NUMA node each restart claims. Stays in
+            flight long enough that the test can verify all concurrent
+            in-flight slots hold distinct nodes."""
+
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 86400,
+                log_name: str | None = None,
+                pid_callback: Any = None,
+                argv_prefix: list[str] | None = None,
+            ) -> object:
+                seed = next(
+                    int(a[2:]) for a in args
+                    if a.startswith("-s") and a[2:].isdigit()
+                )
+                # Parse the node from argv_prefix.
+                node = -1
+                if argv_prefix is not None:
+                    for tok in argv_prefix:
+                        if tok.startswith("--membind="):
+                            node = int(tok.split("=")[1])
+                            break
+                # Record entry. Uniqueness check is performed after
+                # the build by walking the history; doing it here
+                # under the lock would race with other workers.
+                with live_seeds_lock, node_history_lock:
+                    node_history.append((seed, "claim", node))
+                    live_seeds.add(seed)
+                # Hold the slot briefly so peers race.
+                time.sleep(0.05)
+                with live_seeds_lock:
+                    live_seeds.discard(seed)
+                    with node_history_lock:
+                        node_history.append((seed, "release", node))
+                k = int(args[-1])
+                rng = np.random.default_rng(seed)
+                np.savetxt(cwd / f"panel.{k}.P",
+                           rng.uniform(0.05, 0.95, size=(10, k)))
+                np.savetxt(cwd / f"panel.{k}.Q",
+                           rng.dirichlet(np.ones(k), size=4))
+                (log_dir / (log_name or f"restart_{seed}.out")).write_text(
+                    f"Loglikelihood: -{seed}.0\n",
+                )
+                return None
+
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+
+        # 5 seeds × 2 parallel slots × 2 NUMA nodes — the exact
+        # configuration where v1.1.0's static seed→node mapping
+        # would have collided.
+        with _patch("admixture_cache.builder.shutil.which",
+                    return_value="/usr/bin/numactl"), \
+             _patch("admixture_cache.builder._detect_numa_nodes",
+                    return_value=2):
+            build_panel_cache(
+                panel_bed=panel_bed,
+                panel_pop_file=pop,
+                clusters_yaml=yaml,
+                k=2,
+                cache_dir=cache_dir,
+                admixture_runner=_SlowRunner(),
+                track="regional",
+                panel_id="p1",
+                panel_version="v1",
+                admixture_version="1.4.0",
+                seeds=[1, 2, 3, 4, 5],
+                threads=1,
+                sd_threshold=10.0,
+                max_parallel_restarts=2,
+                numa_node_per_restart=True,
+            )
+
+        # All seeds saw a node assignment (None means no pinning).
+        claims = [(s, n) for s, evt, n in node_history if evt == "claim"]
+        assert len(claims) == 5
+        for s, n in claims:
+            assert n in (0, 1), f"seed {s} got node {n}"
+
+        # The strict assertion: at no point should two concurrent
+        # claims have occupied the same node. Reconstruct the
+        # in-flight set as we walk the history.
+        in_flight: dict[int, int] = {}  # seed → node
+        for s, evt, n in node_history:
+            if evt == "claim":
+                # Check no current in-flight seed holds this node.
+                conflict = [
+                    other_s for other_s, other_n in in_flight.items()
+                    if other_n == n
+                ]
+                assert not conflict, (
+                    f"seed {s} tried to claim node {n} while seeds "
+                    f"{conflict} were already on it: {node_history}"
+                )
+                in_flight[s] = n
+            elif evt == "release":
+                in_flight.pop(s, None)
 
 
 class TestBuildPanelCacheAutoDefault:

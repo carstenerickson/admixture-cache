@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -52,8 +53,23 @@ def project_target(
     Total wallclock: ~2 sec end-to-end on a typical 850K-SNP panel
     (excluding the 28-sec pandas .raw load that currently dominates;
     can be reduced further with bed-reader).
+
+    The ``work_dir`` may be reused across calls — this function creates
+    a unique per-call subdirectory (``work_dir/<target-stem>-<uuid>/``)
+    so concurrent or back-to-back invocations don't collide on
+    intermediate files or log names.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
+    # Per-call subdir keyed by target stem + short uuid. Without
+    # this, two project_target calls sharing a work_dir would
+    # overwrite each other's intermediate files (target_aligned.bed,
+    # target_dosage.raw) AND their log files (align_target_aligned.out,
+    # dosage_target_dosage.out), and SubprocessToolRunner's
+    # one-generation .prev rotation would drop the older debug
+    # history silently. The subdir guarantees per-call isolation.
+    call_id = uuid.uuid4().hex[:8]
+    call_dir = work_dir / f"{target_bed.stem}-{call_id}"
+    call_dir.mkdir(parents=True, exist_ok=False)
 
     t0 = time.time()
     manifest = load_cache_manifest(cache_dir)
@@ -75,22 +91,22 @@ def project_target(
         )
 
     # Step 2: align target to panel variant set + axes
-    aligned_prefix = work_dir / "target_aligned"
+    aligned_prefix = call_dir / "target_aligned"
     aligned_bed = align_target_to_panel_bim(
         target_bed=target_bed,
         panel_bim=panel_bim,
         output_prefix=aligned_prefix,
         plink2_runner=plink2_runner,
-        log_dir=work_dir / "logs",
+        log_dir=call_dir / "logs",
     )
 
     # Step 3: extract dosage as NumPy array
-    dosage_prefix = work_dir / "target_dosage"
+    dosage_prefix = call_dir / "target_dosage"
     dosage = extract_target_dosage_via_plink2(
         target_bed=aligned_bed,
         output_prefix=dosage_prefix,
         plink2_runner=plink2_runner,
-        log_dir=work_dir / "logs",
+        log_dir=call_dir / "logs",
     )
 
     # Step 4: load cached P

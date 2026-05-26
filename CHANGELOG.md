@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-05-26
+
+Post-release hotfix addressing the 14 confirmed findings from the
+v1.1.0 max-effort code review. All fixes are backward-compatible
+relative to v1.1.0; no public API or manifest schema changes.
+
+### Fixed — correctness
+
+- **NUMA slot pool sizing — workers no longer block; cancellation cannot orphan ADMIXTURE subprocesses.** The v1.1.0 / first-pass v1.1.1 implementation sized the `queue.Queue` to `numa_n_nodes` (== `min(n_nodes, effective_parallelism)`); when `n_nodes < effective_parallelism` (e.g. dual-socket box with `max_parallel_restarts=4`), excess workers blocked in `queue.get()` BEFORE registering a PID. On first-failure, `_cancel_inflight` would no-op against blocked workers; after a peer released its slot, the blocked worker would unblock, claim the slot, and spawn a fresh ADMIXTURE subprocess that the cancellation path could never reach — leaving up-to-24h orphans. The queue is now sized to `effective_parallelism`, with entries cycled via `i % numa_n_nodes`. Partial pinning (some workers share a node) is documented + logged as a WARNING; no worker ever blocks.
+- **`Path.with_suffix` dotted-stem bug fixed at all remaining call sites, not just `_detect_target_format`.** v1.1.1's first pass introduced `_append_suffix` for `alignment._detect_target_format` only — but `ld_prune_panel` had the same bug at its prune.in / .bed existence checks (caller-supplied `output_prefix` with a dotted stem like `aadr.v66.pruned` would mis-probe to `aadr.prune.in`). Lifted the helper to `admixture_cache._paths.append_suffix` + applied at every user-controlled callsite. Library-controlled with_suffix calls (where the path is guaranteed to carry the expected extension by docstring contract) are unchanged.
+- **`align_target_to_panel_bim` validates the FULL aligned BED triplet, not just `.bed`.** Previously a partial plink2 output (`.bed` present but `.bim` truncated) returned success; downstream `extract_target_dosage_via_plink2` raised "BED triplet incomplete" — confusingly attributing the failure to the wrong step. Now the alignment helper itself raises with the missing-sibling list.
+- **`ld_prune_panel` validates the full pruned BED triplet** with the same `append_suffix` + missing-sibling-list pattern.
+- **`_detect_target_format` no longer mangles paths with dotted stems.** When the input had no plink suffix but contained a dot in its name (e.g. `cohort.v2`), `Path.with_suffix(".pgen")` REPLACED the `.v2` segment instead of appending — the function probed `cohort.pgen` rather than `cohort.v2.pgen` and either raised a false "not found" or silently read an unrelated file with the same probed name. Fix uses raw name concatenation (`stem.parent / (stem.name + suffix)`) for sibling probing.
+- **NUMA pinning uses a slot-based free-list, not a static seed→node map.** v1.1.0 precomputed `numa_node_for_seed = {s: i % n_nodes for i, s in enumerate(sorted(seeds))}` at submit time; for `len(seeds) > effective_parallelism` (the common case — 5 seeds × 2 parallel slots), once one restart finished and the next started while a peer was still running, two concurrent restarts could land on the same node. Replaced with a `queue.Queue` of free nodes: workers claim on entry, release on exit; at most `min(n_nodes, parallelism)` workers are in flight and each holds a distinct node.
+- **NUMA pinning warns + degrades to non-pinned when the runner doesn't support `argv_prefix`.** v1.1.0 silently dropped the kwarg on v1.0-era runners (no warning, INFO log still announced "NUMA pinning enabled"). Now logs a clear warning naming the missing kwarg and points at the v1.1 Protocol extension.
+- **`_detect_numa_nodes` now filters for directories with the `nodeN` naming convention.** v1.1.0's `p.name.startswith("node")` would count any file/symlink starting with "node" (e.g. a future `node_list` sysfs entry, container-overlay quirks). Now requires `p.is_dir() and p.name[4:].isdigit()`.
+- **`_detect_target_format` validates sibling files in the explicit-suffix branches.** v1.1.0 only checked sibling existence in the suffixless-probe fallback; passing `target.bed` with a missing `.bim`/`.fam` got an opaque plink2 downstream error instead of the actionable `PanelCacheError` the helper is designed to produce. Now raises `PanelCacheError` with the missing-sibling list in every branch.
+- **`SubprocessToolRunner` FileNotFoundError attributes the correct binary.** When `argv_prefix=["numactl", "--membind=N", "--"]` was set and numactl wasn't on PATH, the error message said `binary {self.binary!r} not found` — but `self.binary` is the ADMIXTURE/plink2 binary, not numactl. Now uses `exc.filename` (or `cmd[0]`) and includes the invocation prefix in the message.
+
+### Fixed — UX / operator surface
+
+- **`admixture-cache build --numa-node-per-restart` flag exposed via CLI.** v1.1.0 added the kwarg to `build_panel_cache` but the CLI didn't forward it; the headline NUMA feature was only reachable via the Python API. Now a store_true flag with help text.
+- **`admixture-cache build --pgen-samplebind-version` flag exposed via CLI.** Same gap as above for the optional provenance field on the manifest.
+- **`extract_target_dosage_via_plink2` accepts PGEN target paths.** v1.1.0 added PGEN support to `align_target_to_panel_bim` but kept the dosage extractor hardcoded to `--bfile`. Now routes through `_detect_target_format` like its sibling. (No-op on the standard `project_target` orchestration path where input is always BED post-alignment, but matters for direct API callers.)
+- **`project_target` creates a unique per-call subdirectory under `work_dir`.** Format: `work_dir/<target-stem>-<uuid8>/`. Avoids intermediate-file + log collisions when callers reuse a `work_dir` across multiple targets (batch projection scripts, test fixtures). The `SubprocessToolRunner` log rotation (`.prev`) only kept one generation, so collisions silently dropped debug history.
+
+### Fixed — test / docs hygiene
+
+- **`test_numa_disabled_by_default_no_argv_prefix` strengthened to verify kwarg ABSENCE.** v1.1.0's assertion `observed == [None, None]` couldn't distinguish "kwarg omitted" from "kwarg forwarded as None"; a regression in the dispatcher's `if argv_prefix is not None` guard would have passed the test. Now captures `set(kwargs.keys())` and asserts `argv_prefix not in` it.
+- **`SubprocessToolRunner` moved out of `cli.py`** into a dedicated `_subprocess_runner.py` module. v1.1.0's bottom-of-`__init__.py` re-export created a `__init__ → cli → __init__` circular import that worked but was order-sensitive and fragile to future re-exports. The new layout has `__init__.py` and `cli.py` BOTH importing top-down from `_subprocess_runner`. Import-linter contract updated to enforce the new layering.
+- **`DEVELOPMENT.md` stale references to `builder._call_runner` updated to `_dispatch._call_runner`** (the v1.1.0 lift was documented in the diff but not in the prose); module map + dependency-graph mermaid now include `_dispatch.py` and `_subprocess_runner.py`.
+- **CHANGELOG documents the v1.1.0 log filename rename** (`plink2_<tag>.out` → `align_<name>.out` / `dosage_<name>.out` for the alignment/dosage steps). Log-scraping pipelines watching for the old prefix should be updated.
+
 ## [1.1.0] - 2026-05-26
 
 Additive minor release. API-additive only; no public API breaks
@@ -179,7 +212,8 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/carstenerickson/admixture-cache/compare/v0.3.1...v1.0.0
 [0.3.1]: https://github.com/carstenerickson/admixture-cache/compare/v0.3.0...v0.3.1

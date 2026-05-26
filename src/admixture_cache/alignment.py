@@ -29,12 +29,20 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from admixture_cache._dispatch import _call_runner
+from admixture_cache._paths import BED_SIBLINGS, PGEN_SIBLINGS, append_suffix
 from admixture_cache.errors import PanelCacheError
 
 if TYPE_CHECKING:
     from admixture_cache.runner import ToolRunner
 
 logger = logging.getLogger(__name__)
+
+
+# Local aliases preserved for grep-friendliness; canonical source
+# of truth is admixture_cache._paths.
+_BED_SIBLINGS = BED_SIBLINGS
+_PGEN_SIBLINGS = PGEN_SIBLINGS
+_append_suffix = append_suffix
 
 
 def _detect_target_format(target_path: Path) -> tuple[str, Path]:
@@ -47,20 +55,54 @@ def _detect_target_format(target_path: Path) -> tuple[str, Path]:
 
     Detection precedence:
 
-    1. Explicit ``.bed`` or ``.pgen`` suffix on the input path.
-    2. No suffix → prefer PGEN if sibling ``.pgen`` exists, else BED.
+    1. Explicit ``.bed`` or ``.pgen`` suffix on the input path; all
+       three sibling files must be present.
+    2. No plink suffix → probe the filesystem; PGEN preferred if both
+       complete triplets exist.
 
-    Raises :class:`PanelCacheError` if neither format is found.
+    Raises :class:`PanelCacheError` if neither format is found OR the
+    explicit format is missing a sibling file (e.g. ``.bed`` present
+    but ``.bim`` missing).
     """
+    # Explicit-suffix branches: caller named the format explicitly.
+    # Require all three sibling files; raise a clear error otherwise so
+    # incomplete triplets surface here rather than as opaque plink2
+    # downstream messages.
     if target_path.suffix == ".bed":
-        return "--bfile", target_path.with_suffix("")
+        stem = target_path.with_suffix("")
+        missing = [
+            s for s in _BED_SIBLINGS
+            if not _append_suffix(stem, s).exists()
+        ]
+        if missing:
+            raise PanelCacheError(
+                f"_detect_target_format: BED triplet for {target_path} "
+                f"is incomplete; missing sibling file(s): "
+                f"{', '.join(missing)}",
+            )
+        return "--bfile", stem
     if target_path.suffix == ".pgen":
-        return "--pfile", target_path.with_suffix("")
-    # No suffix — probe the filesystem
-    stem = target_path
-    if stem.with_suffix(".pgen").exists():
+        stem = target_path.with_suffix("")
+        missing = [
+            s for s in _PGEN_SIBLINGS
+            if not _append_suffix(stem, s).exists()
+        ]
+        if missing:
+            raise PanelCacheError(
+                f"_detect_target_format: PGEN triplet for {target_path} "
+                f"is incomplete; missing sibling file(s): "
+                f"{', '.join(missing)}",
+            )
         return "--pfile", stem
-    if stem.with_suffix(".bed").exists():
+
+    # No plink suffix — probe the filesystem. Use APPEND semantics
+    # (`stem.name + ".pgen"`) rather than `with_suffix` so that a stem
+    # like `cohort.v2` doesn't get its trailing `.v2` replaced
+    # (which would silently probe the wrong path).
+    stem = target_path
+    if _append_suffix(stem, ".pgen").exists():
+        return "--pfile", stem
+    if _append_suffix(stem, ".bed").exists():
         return "--bfile", stem
     raise PanelCacheError(
         f"_detect_target_format: target {target_path} not found as "
@@ -119,11 +161,23 @@ def align_target_to_panel_bim(
         log_name=f"align_{output_prefix.name}.out",
     )
 
-    aligned_bed = output_prefix.with_suffix(".bed")
-    if not aligned_bed.exists():
+    # Validate that plink2 produced the FULL aligned BED triplet, not
+    # just the `.bed`. A truncated `.bim`/`.fam` (disk-full, killed
+    # subprocess, FS error) would otherwise surface downstream as a
+    # confusing "BED triplet incomplete" inside
+    # `extract_target_dosage_via_plink2`, which would mis-attribute
+    # the failure to dosage extraction rather than alignment.
+    aligned_bed = append_suffix(output_prefix, ".bed")
+    missing = [
+        append_suffix(output_prefix, s)
+        for s in BED_SIBLINGS
+        if not append_suffix(output_prefix, s).exists()
+    ]
+    if missing:
         raise PanelCacheError(
-            f"align_target_to_panel_bim: plink2 succeeded but "
-            f"{aligned_bed} not produced",
+            f"align_target_to_panel_bim: plink2 succeeded but produced "
+            f"an incomplete BED triplet at {output_prefix}; missing "
+            f"sibling file(s): {[p.name for p in missing]}",
         )
     return aligned_bed
 
@@ -137,6 +191,12 @@ def extract_target_dosage_via_plink2(
     then parse to a NumPy 1D array of len M (M = SNPs in target.bim,
     NaN for missing).
 
+    The ``target_bed`` parameter accepts either a BED path or a PGEN
+    path (same as :func:`align_target_to_panel_bim`); plink2 handles
+    both natively via ``--bfile`` / ``--pfile``. The kwarg name is
+    BED-specific for backward compatibility; PGEN acceptance added in
+    v1.1.1.
+
     For a single target, this is acceptable (~28 sec on 850K SNPs).
     A future optimization is to replace with ``bed-reader`` library
     for direct binary BED reading (~30× faster).
@@ -146,10 +206,12 @@ def extract_target_dosage_via_plink2(
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    input_flag, input_stem = _detect_target_format(target_bed)
+
     _call_runner(
         plink2_runner,
         args=[
-            "--bfile", str(target_bed.with_suffix("")),
+            input_flag, str(input_stem),
             "--recode", "A",
             "--out", str(output_prefix),
         ],
@@ -159,7 +221,7 @@ def extract_target_dosage_via_plink2(
         log_name=f"dosage_{output_prefix.name}.out",
     )
 
-    raw_path = output_prefix.with_suffix(".raw")
+    raw_path = append_suffix(output_prefix, ".raw")
     if not raw_path.exists():
         raise PanelCacheError(
             f"extract_target_dosage_via_plink2: {raw_path} not produced",

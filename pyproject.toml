@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "admixture-cache"
-version = "1.1.0"
+version = "1.1.1"
 description = "Precomputed-P supervised-ADMIXTURE projection cache: build slow once, project fast per target."
 readme = "README.md"
 license = { text = "MIT" }
@@ -132,17 +132,18 @@ type = "layers"
 layers = [
     "admixture_cache.cli",
     "admixture_cache.orchestration | admixture_cache.builder",
-    "admixture_cache.io",
+    "admixture_cache.io | admixture_cache._subprocess_runner",
     "admixture_cache.projection | admixture_cache.alignment | admixture_cache.manifest",
-    "admixture_cache._dispatch",
+    "admixture_cache._dispatch | admixture_cache._paths",
     "admixture_cache.errors | admixture_cache.runner",
 ]
 ignore_imports = [
-    # __init__.py re-exports symbols from every submodule, including cli
-    # (for SubprocessToolRunner). The other re-exports are top-down
-    # consistent with the layer order; the cli import lands at the
-    # bottom of __init__ specifically because it would otherwise be a
-    # cycle. Treat all __init__ → submodule edges as exempt — the
-    # public-API surface is not subject to layer ordering.
+    # __init__.py re-exports symbols from every submodule. Re-exports
+    # land in declaration order at module-load time; treating
+    # `admixture_cache -> admixture_cache.*` as exempt keeps the
+    # public-API surface decoupled from layer ordering. (Pre-v1.1.1
+    # also imported SubprocessToolRunner from cli.py at __init__ bottom,
+    # which introduced a __init__ → cli → __init__ cycle; v1.1.1
+    # moved the class to _subprocess_runner.py to break that cycle.)
     "admixture_cache -> admixture_cache.*",
 ]

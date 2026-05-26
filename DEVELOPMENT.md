@@ -12,28 +12,34 @@ The "why" behind the code. For setup, validation gates, and PR conventions, see 
 src/admixture_cache/
 ├── __init__.py        # public API re-exports
 ├── projection.py      # numpy_supervised_projection + ProjectionResult
-├── builder.py         # build_panel_cache, _run_one_admixture_restart, ld_prune_panel
-├── manifest.py        # PanelCacheManifest pydantic model + track/continent validator
-├── alignment.py       # align_target_to_panel_bim, extract_target_dosage_via_plink2
-├── io.py              # load_cached_p, load_cache_manifest, verify_..., sha256_file
-├── orchestration.py   # project_target end-to-end wrapper
-├── cli.py             # admixture-cache console script + SubprocessToolRunner
-├── runner.py          # ToolRunner Protocol
-├── errors.py          # PanelCacheError + PopAutomationConfigError alias
-└── py.typed           # PEP 561 marker (consumers get our type info)
+├── builder.py             # build_panel_cache, _run_one_admixture_restart, ld_prune_panel
+├── manifest.py            # PanelCacheManifest pydantic model + track/continent validator
+├── alignment.py           # align_target_to_panel_bim, extract_target_dosage_via_plink2
+├── io.py                  # load_cached_p, load_cache_manifest, verify_..., sha256_file
+├── orchestration.py       # project_target end-to-end wrapper
+├── _dispatch.py           # _call_runner + _runner_supports (Protocol extension forwarder)
+├── _paths.py              # append_suffix (avoids Path.with_suffix dotted-stem bug)
+├── _subprocess_runner.py  # reference SubprocessToolRunner implementation
+├── cli.py                 # admixture-cache console script
+├── runner.py              # ToolRunner Protocol
+├── errors.py              # PanelCacheError + PopAutomationConfigError alias
+└── py.typed               # PEP 561 marker (consumers get our type info)
 ```
 
-### Dependency convention (current state, not lint-enforced)
+### Dependency convention (enforced by import-linter)
 
 | Module | Imports from |
 |---|---|
 | `errors.py` | stdlib only |
 | `runner.py` | stdlib only (`Protocol`, `Path`) |
 | `manifest.py` | stdlib + pydantic |
+| `_dispatch.py` | stdlib + `runner` (TYPE_CHECKING) |
+| `_paths.py` | stdlib only |
 | `projection.py` | stdlib + numpy + scipy + `errors` |
 | `io.py` | stdlib + numpy + `errors` + `manifest` |
-| `alignment.py` | stdlib + numpy + pandas (inline) + `errors` + `runner` (TYPE_CHECKING) |
-| `builder.py` | stdlib + numpy + `errors` + `manifest` + `io` + `runner` (TYPE_CHECKING) |
+| `alignment.py` | stdlib + numpy + pandas (inline) + `errors` + `_dispatch` + `runner` (TYPE_CHECKING) |
+| `_subprocess_runner.py` | stdlib + `errors` |
+| `builder.py` | stdlib + numpy + `errors` + `manifest` + `io` + `_dispatch` + `runner` (TYPE_CHECKING) |
 | `orchestration.py` | stdlib + numpy + `errors` + `alignment` + `io` + `projection` + `runner` (TYPE_CHECKING) |
 | `cli.py` | everything (it's the integration point) |
 
@@ -44,9 +50,11 @@ graph TD
     errors[errors.py]
     runner[runner.py]
     manifest[manifest.py]
+    dispatch[_dispatch.py]
     projection[projection.py]
     alignment[alignment.py]
     io[io.py]
+    subproc[_subprocess_runner.py]
     builder[builder.py]
     orchestration[orchestration.py]
     cli[cli.py]
@@ -56,6 +64,7 @@ graph TD
     errors --> io
     errors --> builder
     errors --> orchestration
+    errors --> subproc
 
     manifest --> io
     manifest --> builder
@@ -66,13 +75,18 @@ graph TD
     projection --> orchestration
     alignment --> orchestration
 
+    dispatch --> alignment
+    dispatch --> builder
+
     io --> cli
     builder --> cli
     orchestration --> cli
+    subproc --> cli
 
     runner -. TYPE_CHECKING .-> alignment
     runner -. TYPE_CHECKING .-> builder
     runner -. TYPE_CHECKING .-> orchestration
+    runner -. TYPE_CHECKING .-> dispatch
 
     classDef root fill:#e8e8e8,stroke:#444
     class errors,runner,manifest root
@@ -220,11 +234,11 @@ Structural interface for the subprocess plumbing. The library doesn't ship a fix
 - A Protocol gives static type-checking ("does this object satisfy `ToolRunner`?") without forcing inheritance.
 - Adding new optional Protocol parameters (`log_name`, `pid_callback`) is API-additive — runners that predate the extension still satisfy the Protocol, and the library detects support via `inspect.signature` at call time.
 
-The reference implementation `SubprocessToolRunner` lives in `cli.py`, not `runner.py`. Why: the CLI is its primary consumer (the default runner shipped with the console script). Library users wanting to reuse it import `from admixture_cache.cli import SubprocessToolRunner`. It's deliberately not in the package `__all__` — consumers with their own runner conventions should prefer those; the CLI default is a convenience for the console-script flow, not the recommended library integration path. (If real usage shows people regularly importing it from `cli`, revisit the export decision then; for now, the friction is intentional.)
+The reference implementation `SubprocessToolRunner` lives in `_subprocess_runner.py` (a private module to keep `runner.py` stdlib-only — see Dependency convention table above — while still letting the package re-export `SubprocessToolRunner` top-down from `__init__.py`). Library users import it as `from admixture_cache import SubprocessToolRunner` (or, equivalently, `from admixture_cache._subprocess_runner import SubprocessToolRunner`). The CLI re-uses the same class for its console-script default. v1.0–v1.1.0 housed it in `cli.py`, which created a circular `__init__ → cli → __init__` import that worked but was order-sensitive; v1.1.1 moved it out to break that cycle.
 
 ## The runner-extension dispatch story
 
-The library extended the `ToolRunner` Protocol in v1.0.0 with two optional kwargs (`log_name`, `pid_callback`). Each is detected at call time via `inspect.signature` (`builder._runner_supports`):
+The library has extended the `ToolRunner` Protocol over two minor releases: v1.0.0 added `log_name` + `pid_callback`; v1.1.0 added `argv_prefix`. Each kwarg is detected at call time via `inspect.signature` (`_dispatch._runner_supports`):
 
 ```mermaid
 flowchart LR
@@ -253,14 +267,13 @@ flowchart LR
 
 The check runs ONCE per `_call_runner` invocation, separately for each optional kwarg. If the runner's `run` method accepts the kwarg directly OR has a `VAR_KEYWORD` (`**kwargs`) parameter, the dispatcher forwards it; otherwise it's silently dropped.
 
-The dispatcher is `builder._call_runner`. It's called from:
+The dispatcher is `_dispatch._call_runner`. It's called from:
 
-- `_run_one_admixture_restart` (passes both `log_name` and `pid_callback`) — the parallel-restart hot path where both extensions matter.
-- `ld_prune_panel` (passes `log_name` only — the two plink2 calls each get a distinct log).
+- `builder._run_one_admixture_restart` (passes `log_name`, `pid_callback`, AND `argv_prefix` when NUMA pinning is active) — the parallel-restart hot path where all three extensions matter.
+- `builder.ld_prune_panel` (passes `log_name` — the two plink2 calls each get a distinct log).
+- `alignment.align_target_to_panel_bim` and `alignment.extract_target_dosage_via_plink2` (pass `log_name` so per-call logs stay collision-free when a caller batches multiple projections through a shared `work_dir`).
 
-`alignment.py`'s `align_target_to_panel_bim` and `extract_target_dosage_via_plink2` call `runner.run(...)` directly, NOT through `_call_runner`. Two reasons: (1) they're single-call, single-target operations with no log-collision risk so they don't need `log_name`; (2) `_call_runner` lives in `builder.py`, and importing it from `alignment` would create a layering violation (alignment is supposed to be a leaf-ish module). If a future feature needs Protocol extensions in alignment, the right move is to lift `_call_runner` into a shared `_dispatch.py` module rather than have alignment depend on builder.
-
-For NEW call sites that DO need parallel-mode kwargs (`log_name` for log disambiguation, `pid_callback` for cancellation), route through `_call_runner` — that's the only way to get the introspection-based degradation for free.
+For NEW call sites, always route through `_call_runner` so the kwargs get introspection-based degradation for free. Direct `runner.run(...)` calls bypass that and silently lose Protocol extensions on older runners.
 
 ### Two gotchas
 
@@ -513,7 +526,7 @@ Pre-hardening, `SubprocessToolRunner` wrapped its Popen in `with proc:`. `Popen.
 | "How does a restart work end-to-end?" | `builder.py`, `_run_one_admixture_restart` |
 | "Where does the parallel-mode guard live?" | `builder.py`, near the top of the `effective_parallelism > 1` branch in `build_panel_cache` |
 | "Where does multimodality validation fire?" | `builder.py`, after the `per_restart_results` collection in `build_panel_cache` |
-| "How does the dispatcher decide what to forward?" | `builder.py`, `_call_runner` + `_runner_supports` |
+| "How does the dispatcher decide what to forward?" | `_dispatch.py`, `_call_runner` + `_runner_supports` |
 | "Where's the manifest schema?" | `manifest.py`, `PanelCacheManifest` |
 | "What's in cache_dir?" | See "Two-phase data flow" diagram above, or the `cache_dir/` block in `README.md` |
 | "How does the CLI start?" | `cli.py`, `cli()` function — the `[project.scripts]` entry point |

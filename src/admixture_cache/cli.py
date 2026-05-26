@@ -18,174 +18,22 @@ calling the library directly from Python.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import logging
 import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
-from admixture_cache import (
-    PanelCacheError,
-    __version__,
-    build_panel_cache,
+from admixture_cache import __version__
+from admixture_cache._subprocess_runner import SubprocessToolRunner
+from admixture_cache.builder import build_panel_cache
+from admixture_cache.errors import PanelCacheError
+from admixture_cache.io import (
     load_cache_manifest,
-    project_target,
     sha256_file,
     verify_cache_matches_current_config,
 )
-
-
-class SubprocessToolRunner:
-    """Default :class:`admixture_cache.ToolRunner` implementation.
-
-    Spawns the binary via ``subprocess.run`` with the given args + cwd,
-    captures stdout and stderr to a single log file under ``log_dir``
-    named ``<binary>_<short-tag>.out``, and raises
-    :class:`PanelCacheError` on non-zero exit or timeout.
-
-    Construct with the absolute path (or name on PATH) of the binary to
-    invoke; the same runner instance can be reused across calls.
-    """
-
-    def __init__(self, binary: str) -> None:
-        self.binary = binary
-
-    def run(
-        self,
-        *,
-        args: list[str],
-        cwd: Path,
-        log_dir: Path,
-        timeout_seconds: int = 600,
-        log_name: str | None = None,
-        pid_callback: Callable[[int], None] | None = None,
-        argv_prefix: list[str] | None = None,
-    ) -> object:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        if log_name is not None:
-            log_path = log_dir / log_name
-        else:
-            log_path = log_dir / self._derive_log_name(args, self.binary)
-        # If a prior attempt left a log at this path, rotate it to
-        # `.prev` rather than clobbering. NOTE: only the *immediately
-        # previous* attempt is preserved — repeated retries overwrite
-        # `.prev` each time. For multi-attempt diagnostics, archive
-        # `.prev` between retries externally.
-        prev_path = log_path.with_suffix(log_path.suffix + ".prev")
-        rotated = False
-        if log_path.exists():
-            log_path.replace(prev_path)
-            rotated = True
-        # argv_prefix wraps the binary call — e.g. ["numactl",
-        # "--membind=0", "--"] pins the spawned process's memory
-        # allocations to NUMA node 0. The prefix elements go BEFORE
-        # self.binary in the spawned argv.
-        cmd = [*(argv_prefix or []), self.binary, *args]
-        try:
-            log_file = log_path.open("w")
-        except OSError as exc:
-            # Restore the rotated file so operators don't lose the
-            # last successful run's log to an unrelated open failure.
-            if rotated:
-                with contextlib.suppress(OSError):
-                    prev_path.replace(log_path)
-            raise PanelCacheError(
-                f"SubprocessToolRunner: cannot open log {log_path}: {exc}",
-            ) from exc
-
-        # NB: `start_new_session=True` puts the child in its own
-        # process group, so `_cancel_inflight` can signal the group
-        # via the same id without racing PID recycle in the parent's
-        # pgroup. Runners with their own subprocess management should
-        # adopt the same pattern.
-        proc: subprocess.Popen[bytes] | None = None
-        returncode: int | None = None
-        try:
-            try:
-                proc = subprocess.Popen(
-                    cmd, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            except FileNotFoundError as exc:
-                # Don't leave an empty log alongside a "binary missing"
-                # error — clean up both the (empty) new log AND any
-                # rotated .prev that we'd otherwise orphan from the
-                # operator's diagnostic surface. Restore prior log on
-                # rotation so the actual last-good attempt survives.
-                log_file.close()
-                log_path.unlink(missing_ok=True)
-                if rotated:
-                    with contextlib.suppress(OSError):
-                        prev_path.replace(log_path)
-                raise PanelCacheError(
-                    f"SubprocessToolRunner: binary {self.binary!r} not "
-                    f"found on PATH or at the given absolute path",
-                ) from exc
-
-            if pid_callback is not None:
-                try:
-                    pid_callback(proc.pid)
-                except Exception:
-                    # Callback failure must not orphan the subprocess.
-                    # Bound the reap (D-state, NFS hang); suppress the
-                    # secondary timeout so the operator sees the
-                    # ORIGINAL callback exception, not a TimeoutExpired
-                    # that obscures it.
-                    proc.kill()
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        proc.wait(timeout=30)
-                    raise
-            try:
-                returncode = proc.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                proc.kill()
-                # Bound the post-kill wait so a child stuck in
-                # uninterruptible-sleep (D-state) doesn't block
-                # cleanup forever. After 30 s the OS owns it.
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(timeout=30)
-                raise PanelCacheError(
-                    f"SubprocessToolRunner: {self.binary} timed out "
-                    f"after {timeout_seconds}s; log at {log_path}",
-                ) from exc
-        finally:
-            # Reap the child if we leave the try-block on any path
-            # (including a callback-raised exception). The kill+wait
-            # above already attempted reaping for the common cases;
-            # this finally is a defense-in-depth against unhandled
-            # exception paths between Popen and the explicit kills.
-            if proc is not None and proc.poll() is None:
-                with contextlib.suppress(Exception):
-                    proc.kill()
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        proc.wait(timeout=30)
-            log_file.close()
-        if returncode is None or returncode != 0:
-            raise PanelCacheError(
-                f"SubprocessToolRunner: {self.binary} exited "
-                f"{returncode}; log at {log_path}",
-            )
-        return None
-
-    @staticmethod
-    def _derive_log_name(args: list[str], binary: str) -> str:
-        """Build a per-call log filename from the args.
-
-        plink2 callers pass `--out <prefix>`; ADMIXTURE callers pass
-        `-s<seed>`. Iterate ``enumerate(args)`` so duplicate flags
-        produce distinct tags (the previous `args.index(a)` always
-        returned the first match).
-        """
-        tag_parts: list[str] = []
-        for i, a in enumerate(args):
-            if a.startswith("-s") and a[2:].isdigit():
-                tag_parts.append(f"seed{a[2:]}")
-            elif a == "--out" and i + 1 < len(args):
-                tag_parts.append(Path(args[i + 1]).name)
-        tag = "_".join(tag_parts) or "run"
-        return f"{Path(binary).name}_{tag}.out"
+from admixture_cache.orchestration import project_target
 
 
 def _detect_admixture_version(binary: str = "admixture") -> str | None:
@@ -306,10 +154,12 @@ def _cmd_build(ns: argparse.Namespace) -> int:
         admixture_version=admixture_version,
         continent=ns.continent,
         geo_filter_yaml_shas=geo_shas or None,
+        pgen_samplebind_version=ns.pgen_samplebind_version,
         seeds=seeds,
         sd_threshold=ns.sd_threshold,
         threads=ns.threads,
         max_parallel_restarts=ns.max_parallel_restarts,
+        numa_node_per_restart=ns.numa_node_per_restart,
         per_restart_timeout_seconds=ns.per_restart_timeout_seconds,
     )
     print(f"cache built at {ns.cache_dir} (best_seed={manifest.best_seed}, "
@@ -435,6 +285,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--per-restart-timeout-seconds", type=int, default=86400,
     )
     p_build.add_argument(
+        "--numa-node-per-restart", action="store_true",
+        help="pin each parallel restart's memory to a distinct NUMA "
+        "node via `numactl --membind=N` (Linux + multi-socket + "
+        "numactl on PATH). +10-30%% on n2-standard-32+ class hardware; "
+        "no-op on single-socket boxes (logs a warning).",
+    )
+    p_build.add_argument(
         "--geo-filter-yaml", action="append", default=[],
         help="repeat as 'name:/path/to/file.yaml'; recorded SHA gates "
         "cache validity",
@@ -446,6 +303,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_build.add_argument(
         "--admixture-version", default=None,
         help="override auto-detected ADMIXTURE version string",
+    )
+    p_build.add_argument(
+        "--pgen-samplebind-version", default=None,
+        help="optional version pin for callers that pre-process the "
+        "panel via pgen-samplebind; recorded on the manifest.",
     )
     p_build.set_defaults(func=_cmd_build)
 

@@ -44,6 +44,7 @@ class _MockRunner:
         cwd: Path,
         log_dir: Path,
         timeout_seconds: int = 600,
+        log_name: str | None = None,
     ) -> object:
         self.calls.append({
             "args": list(args),
@@ -52,16 +53,41 @@ class _MockRunner:
             "timeout_seconds": timeout_seconds,
         })
         # Find --out and emit stub files for downstream existence checks.
+        # Real plink2 --make-bed emits the full BED triplet; mirror that
+        # so v1.1.1's triplet-completeness check in
+        # `align_target_to_panel_bim` doesn't trip on the stub output.
         if "--out" in args:
             out_prefix = Path(args[args.index("--out") + 1])
             if self.emit_bed:
                 out_prefix.with_suffix(".bed").touch()
+                out_prefix.with_suffix(".bim").touch()
+                out_prefix.with_suffix(".fam").touch()
             if self.emit_raw and self.raw_content is not None:
                 out_prefix.with_suffix(".raw").write_text(self.raw_content)
         return None
 
 
+def _write_bed_triplet(tmp_path: Path, stem: str = "target") -> Path:
+    """Create a minimal BED triplet (.bed/.bim/.fam) so the new
+    sibling-file validation in `_detect_target_format` accepts the
+    path. Returns the .bed path."""
+    bed = tmp_path / f"{stem}.bed"
+    bed.write_bytes(b"\x6c\x1b\x01")
+    (tmp_path / f"{stem}.bim").write_text("1\trs1\t0\t1\tA\tC\n")
+    (tmp_path / f"{stem}.fam").write_text("F\tI\t0\t0\t0\t-9\n")
+    return bed
+
+
 class TestAlignTargetToPanelBim:
+    @pytest.fixture(autouse=True)
+    def _ensure_target_triplet(self, tmp_path: Path) -> None:
+        """v1.1.1 added sibling-file validation in
+        `_detect_target_format`; tests that pass `target.bed` paths
+        now need the full BED triplet on disk. Autouse fixture
+        creates one per-test so each test_* method's `tmp_path /
+        'target.bed'` resolves to a valid BED triplet."""
+        _write_bed_triplet(tmp_path)
+
     def test_args_constructed_correctly(self, tmp_path: Path) -> None:
         runner = _MockRunner(emit_bed=True)
         out_prefix = tmp_path / "aligned"
@@ -116,10 +142,11 @@ class TestAlignTargetToPanelBim:
         assert result.exists()
 
     def test_missing_bed_after_run_raises(self, tmp_path: Path) -> None:
-        """If plink2 'succeeded' (runner returned) but no .bed appeared,
-        we raise a clear PanelCacheError."""
+        """If plink2 'succeeded' (runner returned) but the aligned BED
+        triplet didn't appear, we raise a clear PanelCacheError naming
+        the missing siblings."""
         runner = _MockRunner(emit_bed=False)
-        with pytest.raises(PanelCacheError, match="not produced"):
+        with pytest.raises(PanelCacheError, match="incomplete BED triplet"):
             align_target_to_panel_bim(
                 target_bed=tmp_path / "target.bed",
                 panel_bim=tmp_path / "panel.bim",
@@ -174,6 +201,170 @@ class TestAlignTargetToPanelBim:
             timeout_seconds=1234,
         )
         assert runner.calls[0]["timeout_seconds"] == 1234
+
+
+class TestAlignmentFullTripletValidation:
+    """v1.1.1 second-pass: `align_target_to_panel_bim` must validate
+    the full BED triplet, not just `.bed`. A partial plink2 output
+    surfacing as a `extract_target_dosage_via_plink2` failure later
+    would mis-attribute the cause."""
+
+    def test_partial_output_raises_with_actionable_message(
+        self, tmp_path: Path,
+    ) -> None:
+        """plink2 returned success but produced only `.bed` (e.g. disk
+        full mid-write). Function must raise PanelCacheError naming
+        which sibling files are missing."""
+        _write_bed_triplet(tmp_path)
+
+        class _BedOnlyRunner:
+            """Emits the .bed but not .bim/.fam to simulate a
+            truncated plink2 write."""
+
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 600,
+                log_name: str | None = None,
+            ) -> object:
+                out_idx = args.index("--out")
+                out_prefix = Path(args[out_idx + 1])
+                out_prefix.with_suffix(".bed").touch()
+                # Deliberately NOT writing .bim / .fam
+                return None
+
+        with pytest.raises(PanelCacheError) as exc_info:
+            align_target_to_panel_bim(
+                target_bed=tmp_path / "target.bed",
+                panel_bim=tmp_path / "panel.bim",
+                output_prefix=tmp_path / "aligned",
+                plink2_runner=_BedOnlyRunner(),
+                log_dir=tmp_path / "logs",
+            )
+        msg = str(exc_info.value)
+        assert "incomplete BED triplet" in msg
+        assert "aligned.bim" in msg
+        assert "aligned.fam" in msg
+
+
+class TestLdPrunePanelDottedPrefixRegression:
+    """v1.1.1 second-pass: `ld_prune_panel`'s sibling probing must use
+    APPEND semantics (not `Path.with_suffix`) so caller-supplied
+    `output_prefix` with dots in the stem (e.g. `aadr.v66.pruned`)
+    don't silently mis-probe."""
+
+    def test_dotted_output_prefix_detects_plink2_output_correctly(
+        self, tmp_path: Path,
+    ) -> None:
+        """With `output_prefix=cohort.v2`, plink2 produces
+        `cohort.v2.prune.in` and `cohort.v2.bed`. The function must
+        probe the correct paths — pre-fix v1.1.1 would have looked
+        for `cohort.prune.in` (stripping `.v2`)."""
+        from admixture_cache.builder import ld_prune_panel
+
+        # Create a minimal panel.bed/.bim/.fam.
+        panel_bed = tmp_path / "panel.bed"
+        panel_bed.write_bytes(b"\x6c\x1b\x01")
+        (tmp_path / "panel.bim").write_text("1\trs0\t0\t1\tA\tC\n")
+        (tmp_path / "panel.fam").write_text("F\tI\t0\t0\t0\t-9\n")
+
+        class _DottedStemRunner:
+            """Mirrors plink2: writes outputs at
+            `<output_prefix><suffix>` (APPEND), not REPLACE."""
+
+            def run(
+                self, *, args: list[str], cwd: Path, log_dir: Path,
+                timeout_seconds: int = 3600,
+                log_name: str | None = None,
+            ) -> object:
+                from admixture_cache._paths import append_suffix
+
+                out_idx = args.index("--out")
+                out_prefix = Path(args[out_idx + 1])
+                if "--indep-pairwise" in args:
+                    append_suffix(out_prefix, ".prune.in").write_text("rs0\n")
+                if "--extract" in args:
+                    append_suffix(out_prefix, ".bed").write_bytes(b"\x6c\x1b\x01")
+                    append_suffix(out_prefix, ".bim").write_text(
+                        "1\trs0\t0\t1\tA\tC\n",
+                    )
+                    append_suffix(out_prefix, ".fam").write_text(
+                        "F\tI\t0\t0\t0\t-9\n",
+                    )
+                return None
+
+        result = ld_prune_panel(
+            panel_bed=panel_bed,
+            output_prefix=tmp_path / "cohort.v2",  # dotted stem
+            plink2_runner=_DottedStemRunner(),
+            log_dir=tmp_path / "logs",
+        )
+        assert result == tmp_path / "cohort.v2.bed"
+        assert result.exists()
+
+
+class TestTargetFormatDottedStemRegression:
+    """v1.1.1 regression: `_detect_target_format` on a suffixless input
+    with a dotted stem (e.g. `cohort.v2`) must NOT replace the trailing
+    `.v2` segment when probing sibling files. Earlier `Path.with_suffix`
+    behavior would silently probe `cohort.pgen` (replacing `.v2`)
+    instead of `cohort.v2.pgen` (appending)."""
+
+    def test_dotted_stem_probes_appended_not_replaced(self, tmp_path: Path) -> None:
+        from admixture_cache.alignment import _detect_target_format
+
+        # Lay down a BED triplet at the dotted stem; the FAKE wrong
+        # stem (without `.v2`) is deliberately absent so the test
+        # fails if `with_suffix` semantics sneak back in.
+        bed = tmp_path / "cohort.v2.bed"
+        bed.write_bytes(b"\x6c\x1b\x01")
+        (tmp_path / "cohort.v2.bim").write_text("1\trs1\t0\t1\tA\tC\n")
+        (tmp_path / "cohort.v2.fam").write_text("F\tI\t0\t0\t0\t-9\n")
+
+        # Pass a suffixless dotted path to force the no-suffix probe.
+        flag, stem = _detect_target_format(tmp_path / "cohort.v2")
+        assert flag == "--bfile"
+        assert stem == tmp_path / "cohort.v2"
+
+    def test_dotted_stem_doesnt_collide_with_unrelated_short_stem(
+        self, tmp_path: Path,
+    ) -> None:
+        """If an unrelated `cohort.pgen` happens to exist nearby, the
+        detector for `cohort.v2` must NOT pick it up (the v1.1.0 bug
+        would silently return --pfile against the wrong cohort)."""
+        from admixture_cache.alignment import _detect_target_format
+
+        # Drop a misleading sibling
+        (tmp_path / "cohort.pgen").write_bytes(b"\x6c\x1b\x10\x00")
+        (tmp_path / "cohort.psam").write_text("#FID\tIID\nF\tI\n")
+        (tmp_path / "cohort.pvar").write_text("#CHROM\tPOS\tID\tREF\tALT\n1\t1\trs1\tA\tC\n")
+
+        # cohort.v2 has no triplet → must raise, NOT silently return
+        # --pfile with `cohort` as stem.
+        with pytest.raises(PanelCacheError, match="not found as either"):
+            _detect_target_format(tmp_path / "cohort.v2")
+
+
+class TestTargetFormatSiblingValidation:
+    """v1.1.1: explicit `.bed` / `.pgen` suffix branches must validate
+    that all three triplet siblings exist, not just the named file."""
+
+    def test_bed_with_missing_bim_raises(self, tmp_path: Path) -> None:
+        from admixture_cache.alignment import _detect_target_format
+
+        (tmp_path / "target.bed").write_bytes(b"\x6c\x1b\x01")
+        # Deliberately omit .bim
+        (tmp_path / "target.fam").write_text("F\tI\t0\t0\t0\t-9\n")
+        with pytest.raises(PanelCacheError, match=r"BED triplet.*incomplete.*\.bim"):
+            _detect_target_format(tmp_path / "target.bed")
+
+    def test_pgen_with_missing_psam_raises(self, tmp_path: Path) -> None:
+        from admixture_cache.alignment import _detect_target_format
+
+        (tmp_path / "target.pgen").write_bytes(b"\x6c\x1b\x10\x00")
+        # Omit .psam
+        (tmp_path / "target.pvar").write_text("#CHROM\tPOS\tID\tREF\tALT\n")
+        with pytest.raises(PanelCacheError, match=r"PGEN triplet.*incomplete.*\.psam"):
+            _detect_target_format(tmp_path / "target.pgen")
 
 
 class TestTargetFormatDetection:
@@ -281,6 +472,10 @@ class TestAlignWithPgenInput:
 
 
 class TestExtractTargetDosageViaPlink2:
+    @pytest.fixture(autouse=True)
+    def _ensure_target_triplet(self, tmp_path: Path) -> None:
+        _write_bed_triplet(tmp_path)
+
     def _raw_for(self, dosages: list[str]) -> str:
         """Build a plink2 --recode A .raw file with one sample row."""
         header = "FID\tIID\tPAT\tMAT\tSEX\tPHENOTYPE\t" + "\t".join(
@@ -358,12 +553,20 @@ class TestProtocolConformance:
     with both a class instance and a MagicMock that supports keyword
     `run(args=..., cwd=..., log_dir=..., timeout_seconds=...)`."""
 
+    @pytest.fixture(autouse=True)
+    def _ensure_target_triplet(self, tmp_path: Path) -> None:
+        _write_bed_triplet(tmp_path)
+
     def test_magicmock_runner_works(self, tmp_path: Path) -> None:
         runner = MagicMock()
 
         def fake_run(**kwargs: Any) -> None:
+            # Emit the full BED triplet — v1.1.1 validates that all
+            # three sibling files exist post-plink2 (not just .bed).
             out_idx = kwargs["args"].index("--out")
-            Path(kwargs["args"][out_idx + 1]).with_suffix(".bed").touch()
+            out_prefix = Path(kwargs["args"][out_idx + 1])
+            for s in (".bed", ".bim", ".fam"):
+                out_prefix.with_suffix(s).touch()
 
         runner.run.side_effect = fake_run
         align_target_to_panel_bim(

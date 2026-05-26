@@ -24,6 +24,7 @@ ADMIXTURE on representative panels (15K samples × 850K SNPs at K=4).
 
 from __future__ import annotations
 
+from admixture_cache._subprocess_runner import SubprocessToolRunner
 from admixture_cache.alignment import (
     align_target_to_panel_bim,
     extract_target_dosage_via_plink2,
@@ -44,12 +45,7 @@ from admixture_cache.projection import (
 )
 from admixture_cache.runner import ToolRunner
 
-__version__ = "1.1.0"
-
-# Imported last so cli.py's `from admixture_cache import ...` resolves
-# against the partially-loaded package after the other re-exports above
-# are already bound.
-from admixture_cache.cli import SubprocessToolRunner
+__version__ = "1.1.1"
 
 __all__ = [
     # Public API — cache build (slow, one-time)

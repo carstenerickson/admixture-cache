@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import signal
@@ -30,6 +31,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 import numpy as np
 
 from admixture_cache._dispatch import _call_runner, _runner_supports
+from admixture_cache._paths import append_suffix
 from admixture_cache.errors import PanelCacheError
 from admixture_cache.io import (
     load_cache_manifest,
@@ -56,14 +58,25 @@ def _detect_numa_nodes() -> int:
     """Return the number of NUMA nodes on the current host.
 
     Reads ``/sys/devices/system/node/`` which Linux populates with one
-    ``nodeN`` subdirectory per NUMA node. Returns 1 on platforms where
-    the path doesn't exist (macOS, Windows, single-node Linux without
-    the sysfs entries).
+    ``nodeN`` subdirectory per NUMA node (N is an integer). Returns 1
+    on platforms where the path doesn't exist (macOS, Windows,
+    single-node Linux without the sysfs entries).
+
+    The kernel convention is strict: directory named ``node<N>`` where
+    ``<N>`` is a non-negative integer. We filter accordingly so that
+    sibling files like ``has_cpu`` / ``has_memory`` / ``online`` —
+    and any future entries that happen to start with ``node`` but
+    aren't node directories — don't inflate the count.
     """
     node_dir = Path("/sys/devices/system/node")
     if not node_dir.is_dir():
         return 1
-    return sum(1 for p in node_dir.iterdir() if p.name.startswith("node"))
+    return sum(
+        1 for p in node_dir.iterdir()
+        if p.is_dir()
+        and p.name.startswith("node")
+        and p.name[4:].isdigit()
+    )
 
 
 def _resolve_numa_nodes(*, enabled: bool, effective_parallelism: int) -> int:
@@ -309,20 +322,53 @@ def build_panel_cache(
         effective_parallelism=effective_parallelism,
     )
 
-    # Seed → NUMA node assignment, sorted by sort-order of seeds so
-    # the same `seeds=[...]` always lands on the same node mapping.
-    # Stable assignment helps reproducibility (build wallclock is
-    # NUMA-affinity-sensitive on multi-socket boxes).
-    numa_node_for_seed: dict[int, int] = (
-        {s: i % numa_n_nodes for i, s in enumerate(sorted(seeds))}
-        if numa_n_nodes > 1 else {}
-    )
+    # If pinning is enabled but the runner can't accept argv_prefix
+    # (and isn't a **kwargs forwarder), the prefix would be silently
+    # dropped. Surface this loudly so operators know NUMA isn't
+    # actually pinning anything; degrade to non-pinned execution.
+    if numa_n_nodes > 1 and not _runner_supports(admixture_runner, "argv_prefix"):
+        logger.warning(
+            "build_panel_cache: numa_node_per_restart=True but the "
+            "supplied admixture_runner doesn't accept the "
+            "`argv_prefix` kwarg (Protocol extension added in v1.1). "
+            "NUMA pinning would be silently dropped — degrading to "
+            "non-pinned execution. Upgrade the runner to accept "
+            "argv_prefix (or declare **kwargs on its `run` method) "
+            "to enable NUMA pinning.",
+        )
+        numa_n_nodes = 1
 
-    def _argv_prefix_for_seed(seed: int) -> list[str] | None:
-        node = numa_node_for_seed.get(seed)
-        if node is None:
-            return None
-        return ["numactl", f"--membind={node}", "--"]
+    # Slot-based NUMA assignment: one queue entry per PARALLEL SLOT
+    # (not per NUMA node). When n_nodes >= effective_parallelism,
+    # every worker gets a distinct node — full NUMA pinning. When
+    # n_nodes < effective_parallelism, the queue holds the nodes
+    # cycled (`i % numa_n_nodes`) so the extra workers share nodes
+    # — partial pinning but no worker ever blocks on `get()`.
+    #
+    # Sizing the queue to numa_n_nodes (not effective_parallelism)
+    # would block excess workers in `get()` BEFORE they registered
+    # a PID; on first-failure, `_cancel_inflight` would no-op against
+    # them, and after a peer released its slot the blocked worker
+    # would unblock, claim the slot, and spawn a FRESH admixture
+    # subprocess that the cancellation path can never reach. That
+    # leaks up-to-24h orphan ADMIXTURE processes per blocked worker.
+    # See https://github.com/carstenerickson/admixture-cache/issues
+    # if you need to reconstruct the v1.1.0 → v1.1.1 history.
+    numa_node_pool: queue.Queue[int] | None = None
+    if numa_n_nodes > 1:
+        numa_node_pool = queue.Queue()
+        for i in range(effective_parallelism):
+            numa_node_pool.put(i % numa_n_nodes)
+        if numa_n_nodes < effective_parallelism:
+            logger.warning(
+                "build_panel_cache: numa_node_per_restart=True with "
+                "%d NUMA node(s) but max_parallel_restarts=%d — %d "
+                "worker(s) will share a node (partial pinning). For "
+                "exclusive per-worker pinning, lower "
+                "max_parallel_restarts to %d.",
+                numa_n_nodes, effective_parallelism,
+                effective_parallelism - numa_n_nodes, numa_n_nodes,
+            )
 
     # PIDs of in-flight subprocesses, keyed by seed. The reference
     # SubprocessToolRunner reports its PID via pid_callback; the
@@ -341,6 +387,23 @@ def build_panel_cache(
         return cb
 
     def _run_one_restart(seed: int) -> _RestartResult:
+        # Claim a NUMA node from the slot pool (if pinning enabled).
+        # The queue is sized to `effective_parallelism` (not
+        # numa_n_nodes), so a worker dispatched by the executor
+        # always finds a slot immediately — no `get()` blocking. When
+        # numa_n_nodes < effective_parallelism, the queue contains
+        # `i % numa_n_nodes` entries, meaning some workers share a
+        # node (partial pinning, see the queue-init comment above).
+        claimed_node: int | None = None
+        argv_prefix: list[str] | None = None
+        if numa_node_pool is not None:
+            # `get_nowait()` would raise queue.Empty if the queue is
+            # ever exhausted; that should be impossible by construction
+            # (one slot per worker), but `get()` is the safer call —
+            # it would surface the contract violation as a hang rather
+            # than a cryptic Empty exception.
+            claimed_node = numa_node_pool.get()
+            argv_prefix = ["numactl", f"--membind={claimed_node}", "--"]
         try:
             return _run_one_admixture_restart(
                 seed=seed,
@@ -354,9 +417,15 @@ def build_panel_cache(
                 per_restart_timeout_seconds=per_restart_timeout_seconds,
                 pid_callback=_make_pid_callback(seed),
                 allow_log_scan_fallback=(effective_parallelism == 1),
-                argv_prefix=_argv_prefix_for_seed(seed),
+                argv_prefix=argv_prefix,
             )
         finally:
+            # Release the NUMA slot back to the pool before dropping
+            # the PID — order doesn't matter functionally, but
+            # releasing the scarcer resource first lets queued
+            # workers pick it up immediately.
+            if claimed_node is not None and numa_node_pool is not None:
+                numa_node_pool.put(claimed_node)
             # Drop the PID once the runner has returned (subprocess is
             # reaped). The cancellation path skips entries already
             # popped from the map; the lock serializes the pop against
@@ -888,7 +957,13 @@ def ld_prune_panel(
         log_name=f"ldprune_{prune_tag}_indep.out",
     )
 
-    prune_in = output_prefix.with_suffix(".prune.in")
+    # output_prefix is a user-supplied stem (not a `.bed` path) — use
+    # APPEND semantics, not `Path.with_suffix`'s REPLACE. A prefix
+    # like `cohort.v2` would have its `.v2` segment silently stripped
+    # by with_suffix, and the existence probe would look for
+    # `cohort.prune.in` (wrong) while plink2 actually wrote
+    # `cohort.v2.prune.in`. See `_paths.append_suffix`.
+    prune_in = append_suffix(output_prefix, ".prune.in")
     if not prune_in.exists():
         raise PanelCacheError(
             f"ld_prune_panel: plink2 --indep-pairwise produced no "
@@ -910,16 +985,29 @@ def ld_prune_panel(
         log_name=f"ldprune_{prune_tag}_extract.out",
     )
 
-    pruned_bed = output_prefix.with_suffix(".bed")
-    if not pruned_bed.exists():
+    pruned_bed = append_suffix(output_prefix, ".bed")
+    pruned_bim = append_suffix(output_prefix, ".bim")
+    missing = [
+        append_suffix(output_prefix, s)
+        for s in (".bed", ".bim", ".fam")
+        if not append_suffix(output_prefix, s).exists()
+    ]
+    if missing:
         raise PanelCacheError(
-            f"ld_prune_panel: plink2 --extract produced no output at "
-            f"{pruned_bed}; see {log_dir} for the plink2 log",
+            f"ld_prune_panel: plink2 --extract produced an incomplete "
+            f"BED triplet at {output_prefix}; missing sibling file(s): "
+            f"{[p.name for p in missing]}; see {log_dir} for the plink2 "
+            f"log",
         )
 
-    # Diagnostics: count variants before/after for the operator
+    # Diagnostics: count variants before/after for the operator.
+    # `panel_bed.with_suffix(".bim")` is correct here because we
+    # require panel_bed to carry the `.bed` extension per the
+    # docstring contract (it's a path, not a stem) — with_suffix
+    # then correctly REPLACES `.bed` with `.bim` even if the stem
+    # itself has dots (e.g. `cohort.v2.bed` → `cohort.v2.bim`).
     pre_count = sum(1 for _ in panel_bed.with_suffix(".bim").open())
-    post_count = sum(1 for _ in pruned_bed.with_suffix(".bim").open())
+    post_count = sum(1 for _ in pruned_bim.open())
     logger.info(
         "ld_prune_panel: %s (%d variants) -> %s (%d retained, "
         "%.1f%% kept, %.2f× SNP reduction)",

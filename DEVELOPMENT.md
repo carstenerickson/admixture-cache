@@ -4,7 +4,7 @@ The "why" behind the code. For setup, validation gates, and PR conventions, see 
 
 ## Architectural shape in one paragraph
 
-`admixture-cache` splits the supervised-ADMIXTURE workflow into two phases so the per-target hot path doesn't pay the panel-training cost. **Phase 1 — `build_panel_cache`** runs stock ADMIXTURE × N restarts via an injected `ToolRunner`, validates that the per-cluster restart standard deviation stays under a threshold (multimodality check), picks the best-LL P matrix, and writes a sealed cache directory whose `manifest.json` SHA-pins every input. **Phase 2 — `project_target`** loads the cached P, aligns target.bed to the cached panel.bim (variant set + REF/ALT axes via plink2), reads the target as a dosage vector, and solves for Q via `scipy.optimize.minimize(method="SLSQP")` against the binomial admixture likelihood `L(q) = ∏_s Binomial(g_s; 2, q^T P_s)` subject to the simplex constraint (`sum(q)=1, q≥0`). The math matches stock `admixture --supervised` Q to ~1e-5 absolute on AADR v66 HO (15K samples × 850K SNPs at K=4); the wallclock split is ~hours-per-restart for phase 1 vs ~2 seconds end-to-end for phase 2.
+`admixture-cache` splits the supervised-ADMIXTURE workflow into two phases so the per-target hot path doesn't pay the panel-training cost. **Phase 1 — `build_panel_cache`** runs stock ADMIXTURE × N restarts via an injected `ToolRunner`, validates that the per-cluster restart standard deviation stays under a threshold (multimodality check), picks the best-LL P matrix, and writes a sealed cache directory whose `manifest.json` SHA-pins every input. **Phase 2 — `project_target`** loads the cached P, aligns target.bed to the cached panel.bim (variant set + REF/ALT axes via plink2), reads the target as a dosage vector, and solves for Q via `scipy.optimize.minimize(method="SLSQP")` against the binomial admixture likelihood `L(q) = ∏_s Binomial(g_s; 2, q^T P_s)` subject to the simplex constraint (`sum(q)=1, q≥0`). The math matches stock `admixture --supervised` Q to ~1e-5 absolute on AADR v66 HO (15K samples × 850K SNPs at K=4); phase 1 takes ~hours-per-restart, phase 2 takes ~30 seconds end-to-end on the same panel — of which ~28 s is the pandas `--recode A` parse, ~0.02 s is the actual SLSQP solve, and the remainder is plink2-based variant intersection + axis alignment. (The "~2 seconds" figure scattered through the README and `orchestration.py` docstring refers to a smaller, LD-pruned panel; the dominant cost is the dosage-load step and replacing it with a binary BED reader is a v1.x stretch goal.)
 
 ## Module map
 
@@ -37,7 +37,21 @@ src/admixture_cache/
 | `orchestration.py` | stdlib + numpy + `errors` + `alignment` + `io` + `projection` + `runner` (TYPE_CHECKING) |
 | `cli.py` | everything (it's the integration point) |
 
-The dependency graph is acyclic: `errors → manifest → io → {alignment, projection} → orchestration → cli`. `runner` is imported only under `TYPE_CHECKING` in the implementation modules — the injected runner objects are used structurally at runtime without needing the Protocol class itself. No tooling enforces this layering; it's a maintenance convention.
+The dependency graph is acyclic. Reading top-down (each module depends only on what's above it):
+
+- **Layer 0 (roots, no internal deps):** `errors`, `runner`, `manifest`
+- **Layer 1 (depend only on roots):** `projection` (→ errors), `alignment` (→ errors), `io` (→ errors, manifest)
+- **Layer 2 (compose layer 1):**
+  - `builder` → errors, manifest, io
+  - `orchestration` → errors, projection, alignment, io
+- **Layer 3 (integration point):** `cli` → everything
+
+Key observations:
+
+- `builder` and `orchestration` are siblings at layer 2 — neither imports the other. Phase 1 (build) and phase 2 (project) don't share a code path other than the shared `io` / `manifest` modules below them.
+- `alignment` and `projection` also don't import each other; `orchestration` is the first place they meet.
+- `runner` is imported only under `TYPE_CHECKING` in the implementation modules. The injected runner objects are used structurally at runtime without needing the Protocol class itself.
+- No tooling enforces this layering; it's a maintenance convention. Worth a `ruff` `flake8-tidy-imports` rule or similar if someone wants to lock it in.
 
 ## Two-phase data flow
 
@@ -129,6 +143,14 @@ The library doesn't define new file formats — it composes PLINK conventions + 
 
 Other manifest fields are observability or provenance, not gating: `cluster_order`, `seeds_used`, `best_seed`, `best_loglikelihood`, `restart_sd_max`, `admixture_version`, `pgen_samplebind_version`, `build_wallclock_seconds`, `build_timestamp`. Changing these doesn't invalidate the cache.
 
+### `build_logs/` layout
+
+One file per restart, named `restart_<seed>.out`, containing the ADMIXTURE process's combined stdout + stderr (the `SubprocessToolRunner` redirects stderr to stdout). If a rerun rotates a prior log, the previous attempt's content lives at `restart_<seed>.out.prev` (only the most recent prior attempt is preserved — successive reruns overwrite the `.prev`). The library never deletes log files; clean-up is the operator's responsibility.
+
+### Best-LL tie-break determinism
+
+`best = max(with_ll, key=lambda r: r["ll"])` picks the highest LL. Ties go to Python's `max` first-in-iteration-order tiebreak; since `per_restart_results` is sorted by seed before the LL filter, ties resolve to the LOWEST-seed restart. This means re-runs of the same build with the same seeds produce byte-identical caches even when multiple restarts hit the same LL (rare but possible at K≥21 on heavily-pruned panels).
+
 ### Where pydantic validation actually fires
 
 The track/continent consistency validator (`manifest._validate_track_continent_consistency`) runs at `PanelCacheManifest(...)` construction, which happens at the END of `build_panel_cache` — after all N ADMIXTURE restarts have completed (hours of work). A build called with `track="ancestral_cluster"` but `continent=None` runs to completion, then raises `ValidationError` at manifest write. The CLI catches this in `_cmd_build` by checking the argparse-validated namespace BEFORE invoking the library, so `admixture-cache build` fails fast. **Library-level callers don't get this short-circuit** — if you're building a higher-level wrapper, mirror the early check.
@@ -141,8 +163,8 @@ The track/continent consistency validator (`manifest._validate_track_continent_c
 |---|---|---|
 | Add field with default (e.g. `new_field: str = "default"` or `new_field: int \| None = None`) | ✓ yes — Pydantic substitutes the default | ✗ no — `extra="forbid"` rejects the unknown field |
 | Add required field (no default) | ✗ no — old caches missing it raise ValidationError | ✗ no — same forward-compat issue |
-| Remove a field | ✓ yes — Pydantic ignores extra fields when `extra="ignore"` was set, but we use `extra="forbid"`, so removing a field means old caches with it FAIL to load (treat as breaking) | n/a |
-| Rename a field | breaking either way — model both as add + remove |
+| Remove a field | ✗ no — old caches still have the field, and `extra="forbid"` rejects it as unknown on the new schema | n/a |
+| Rename a field | breaking either way — model both as add + remove | breaking either way |
 | Add a new track/continent enum value | ✓ yes — old caches don't have it | ✓ yes if the validator accepts it without other code paths needing updates |
 
 **Bump `schema_version`** when any change is breaking. Currently `schema_version: int = 1`. A future v2 manifest would need a load-time dispatcher (read the version field first, then branch on schema-specific parsers). Not implemented yet — when the first breaking change lands, design that path.
@@ -175,18 +197,20 @@ Structural interface for the subprocess plumbing. The library doesn't ship a fix
 - A Protocol gives static type-checking ("does this object satisfy `ToolRunner`?") without forcing inheritance.
 - Adding new optional Protocol parameters (`log_name`, `pid_callback`) is API-additive — runners that predate the extension still satisfy the Protocol, and the library detects support via `inspect.signature` at call time.
 
-The reference implementation `SubprocessToolRunner` lives in `cli.py`, not `runner.py`. Why: the CLI is its primary consumer (the default runner shipped with the console script), and the runner depends on argparse-validated config (binary path). Library users wanting to reuse it import `from admixture_cache.cli import SubprocessToolRunner` — it's not in the package `__all__` because we don't want to imply it's the recommended path (consumers with their own runner conventions should prefer those). Worth considering whether to re-export from `__init__.py` in a future minor version.
+The reference implementation `SubprocessToolRunner` lives in `cli.py`, not `runner.py`. Why: the CLI is its primary consumer (the default runner shipped with the console script). Library users wanting to reuse it import `from admixture_cache.cli import SubprocessToolRunner`. It's deliberately not in the package `__all__` — consumers with their own runner conventions should prefer those; the CLI default is a convenience for the console-script flow, not the recommended library integration path. (If real usage shows people regularly importing it from `cli`, revisit the export decision then; for now, the friction is intentional.)
 
 ## The runner-extension dispatch story
 
 The library extended the `ToolRunner` Protocol in v1.0.0 with two optional kwargs (`log_name`, `pid_callback`). Each is detected at call time via `inspect.signature` (`builder._runner_supports`). If the runner accepts the kwarg directly OR has a `VAR_KEYWORD` (`**kwargs`) parameter, the dispatcher forwards the kwarg; otherwise it's silently dropped.
 
-The dispatcher is `builder._call_runner`. Every runtime invocation of a `ToolRunner` from inside the library goes through this dispatcher, in:
+The dispatcher is `builder._call_runner`. It's called from:
 
-- `_run_one_admixture_restart` (passes both `log_name` and `pid_callback`)
-- `ld_prune_panel` (passes `log_name` only — the two plink2 calls each get a distinct log)
+- `_run_one_admixture_restart` (passes both `log_name` and `pid_callback`) — the parallel-restart hot path where both extensions matter.
+- `ld_prune_panel` (passes `log_name` only — the two plink2 calls each get a distinct log).
 
-Direct `runner.run(...)` calls without `_call_runner` are an anti-pattern; route new call sites through the dispatcher for free Protocol-extension support.
+`alignment.py`'s `align_target_to_panel_bim` and `extract_target_dosage_via_plink2` call `runner.run(...)` directly, NOT through `_call_runner`. Two reasons: (1) they're single-call, single-target operations with no log-collision risk so they don't need `log_name`; (2) `_call_runner` lives in `builder.py`, and importing it from `alignment` would create a layering violation (alignment is supposed to be a leaf-ish module). If a future feature needs Protocol extensions in alignment, the right move is to lift `_call_runner` into a shared `_dispatch.py` module rather than have alignment depend on builder.
+
+For NEW call sites that DO need parallel-mode kwargs (`log_name` for log disambiguation, `pid_callback` for cancellation), route through `_call_runner` — that's the only way to get the introspection-based degradation for free.
 
 ### Two gotchas
 
@@ -263,7 +287,22 @@ Python 3.14 cells in the matrix were placeholder-then-validated when 3.14 reache
 
 ### Test file organization
 
-One `tests/unit/test_<module>.py` per `src/admixture_cache/<module>.py`. When adding a new module, add a matching test file.
+Convention: one `tests/unit/test_<module>.py` per non-trivial source module. Current state:
+
+| Source module | Test file | Notes |
+|---|---|---|
+| `projection.py` | `test_projection.py` | Math correctness against analytic Q |
+| `manifest.py` | `test_manifest.py` | Schema validation + legacy JSON reparse |
+| `io.py` | `test_io.py` | SHA streaming + verify_cache_matches_current_config |
+| `alignment.py` | `test_alignment.py` | Mock plink2 + arg-construction assertions |
+| `builder.py` | `test_builder.py` | The big one — idempotency, multimodality, dispatch, symlinks, cancellation |
+| `cli.py` | `test_cli.py` | Argparse, exit codes, SubprocessToolRunner end-to-end |
+| `errors.py` | (none) | Trivial — alias + docstring; covered via raise sites in other tests |
+| `runner.py` | (none) | Pure Protocol declaration; covered via runner-shape tests in test_builder |
+| `orchestration.py` | (none) | `project_target` is integration glue; covered transitively via test_alignment + test_builder |
+| `__init__.py` | (none) | Re-exports asserted in `test_cli.py` |
+
+When adding a new module with non-trivial behavior, add a matching test file. Trivial glue modules can defer to integration coverage.
 
 ### Helpers
 

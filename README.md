@@ -162,7 +162,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the per-release detail.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the three local validation gates (pytest / ruff / mypy), commit conventions, and the tag → OIDC PyPI release procedure.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the three local validation gates (pytest / ruff / mypy), commit conventions, and the tag → OIDC PyPI release procedure. See [DEVELOPMENT.md](DEVELOPMENT.md) for the architecture map, design rationale, and module-level walkthroughs.
 
 ## Acknowledgments
 

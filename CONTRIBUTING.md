@@ -4,6 +4,8 @@ The project is small and opinionated. Substantive scope changes (alternative sol
 
 For bug reports, small fixes, additive improvements, or test coverage, a PR is the right next step.
 
+For the architecture map, design rationale, and module-level walkthroughs, see [`DEVELOPMENT.md`](DEVELOPMENT.md). For the release runbook, see [`docs/RELEASE.md`](docs/RELEASE.md).
+
 ## Dev setup
 
 ```bash

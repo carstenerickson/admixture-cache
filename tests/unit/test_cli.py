@@ -172,14 +172,122 @@ class TestVerifyCommand:
 
 
 class TestDownloadCommand:
-    def test_download_returns_2_with_stub_message(
+    """End-to-end tests of the `download` subcommand mocking the
+    underlying `download_cache` / `list_available_caches` so we
+    don't hit the real GitHub API."""
+
+    def test_download_no_name_no_list_returns_2(
         self, capsys: pytest.CaptureFixture[str],
     ) -> None:
-        rc = main(["download", "regional-k21"])
+        rc = main(["download"])
         assert rc == 2
-        captured = capsys.readouterr()
-        assert "not yet" in captured.err
-        assert "regional-k21" in captured.err
+        assert "name required" in capsys.readouterr().err
+
+    def test_download_invokes_library_function(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`download <name>` calls `download_cache` and prints the
+        installed path on success."""
+        captured_kwargs: dict[str, object] = {}
+
+        def fake_download_cache(name: str, **kwargs: object) -> Path:
+            captured_kwargs["name"] = name
+            captured_kwargs.update(kwargs)
+            installed = tmp_path / "fake_root" / name
+            installed.mkdir(parents=True)
+            return installed
+
+        monkeypatch.setattr(
+            "admixture_cache.distribution.download_cache",
+            fake_download_cache,
+        )
+        rc = main([
+            "download", "regional_k21_aadr_v66_ho",
+            "--cache-root", str(tmp_path / "fake_root"),
+            "--quiet",
+        ])
+        assert rc == 0
+        assert captured_kwargs["name"] == "regional_k21_aadr_v66_ho"
+        assert captured_kwargs["force"] is False
+        out = capsys.readouterr().out
+        assert "Installed regional_k21_aadr_v66_ho" in out
+
+    def test_download_list_prints_available_caches(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`download --list` enumerates releases newest-first."""
+        from datetime import UTC, datetime
+
+        from admixture_cache.distribution import CacheRelease
+
+        fake_releases = [
+            CacheRelease(
+                name="regional_k21_aadr_v66_ho",
+                version="v2", tag="cache-regional_k21_aadr_v66_ho-v2",
+                tarball_url="https://example.com/regional_k21_aadr_v66_ho.tar.gz",
+                sha256_url="https://example.com/regional_k21_aadr_v66_ho.tar.gz.sha256",
+                size_bytes=120_000_000,
+                published_at=datetime(2026, 5, 26, tzinfo=UTC),
+                html_url="https://example.com/release/v2",
+                notes="",
+            ),
+            CacheRelease(
+                name="regional_k21_aadr_v66_ho",
+                version="v1", tag="cache-regional_k21_aadr_v66_ho-v1",
+                tarball_url="https://example.com/old.tar.gz",
+                sha256_url="https://example.com/old.tar.gz.sha256",
+                size_bytes=100_000_000,
+                published_at=datetime(2026, 4, 1, tzinfo=UTC),
+                html_url="https://example.com/release/v1",
+                notes="",
+            ),
+        ]
+        monkeypatch.setattr(
+            "admixture_cache.distribution.list_available_caches",
+            lambda **_kw: fake_releases,
+        )
+        rc = main(["download", "--list"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Latest version listed; older versions noted parenthetically.
+        assert "regional_k21_aadr_v66_ho  v2" in out
+        assert "(also: v1)" in out
+        assert "https://example.com/release/v2" in out
+
+    def test_download_no_caches_published(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            "admixture_cache.distribution.list_available_caches",
+            lambda **_kw: [],
+        )
+        rc = main(["download", "--list"])
+        assert rc == 0
+        assert "No published caches" in capsys.readouterr().err
+
+    def test_download_library_error_returns_1(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A PanelCacheError from download_cache surfaces as exit 1."""
+        def boom(name: str, **_kw: object) -> Path:
+            raise PanelCacheError("simulated network failure")
+
+        monkeypatch.setattr(
+            "admixture_cache.distribution.download_cache",
+            boom,
+        )
+        rc = main(["download", "regional_k21", "--quiet"])
+        assert rc == 1
+        assert "simulated network failure" in capsys.readouterr().err
 
 
 class TestSubprocessToolRunner:

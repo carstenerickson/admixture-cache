@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "admixture-cache"
-version = "1.2.0"
+version = "1.3.0"
 description = "Precomputed-P supervised-ADMIXTURE projection cache: build slow once, project fast per target."
 readme = "README.md"
 license = { text = "MIT" }
@@ -138,7 +138,7 @@ name = "Module layering"
 type = "layers"
 layers = [
     "admixture_cache.cli",
-    "admixture_cache.orchestration | admixture_cache.builder",
+    "admixture_cache.orchestration | admixture_cache.builder | admixture_cache.distribution",
     "admixture_cache.io | admixture_cache._subprocess_runner",
     "admixture_cache.projection | admixture_cache.alignment | admixture_cache.manifest",
     "admixture_cache._dispatch | admixture_cache._paths",

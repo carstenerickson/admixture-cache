@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-26
+
+Adds the panel-cache distribution layer — `admixture-cache download`
+is no longer a placeholder. Library + CLI fetch canonical caches
+from GitHub Releases with streaming SHA-256 verification and atomic
+on-disk install. Publisher-side runbook in `docs/PUBLISH_CACHE.md`.
+
+### Added
+
+- **`admixture_cache.distribution` module** — new public API:
+  - `download_cache(name, ...) -> Path` fetches a published cache
+    by name and installs at `<cache_root>/<name>/`, returning the
+    cache_dir path suitable for `project_target(cache_dir=...)`.
+  - `list_available_caches() -> list[CacheRelease]` queries the
+    GitHub Releases REST API and returns one `CacheRelease` per
+    release matching the `cache-<name>-<version>` tag convention
+    with both `<name>.tar.gz` and `<name>.tar.gz.sha256` assets.
+  - `CacheRelease` dataclass surfacing tarball URL, sha256 URL,
+    size, publish date, version number, release page URL.
+- **`admixture-cache download` CLI is now functional** (was a v1.0
+  placeholder returning exit 2 with a "not yet available" message):
+  - `admixture-cache download <name>` — install the latest version
+    of a named cache to `<cache-root>/<name>/`.
+  - `admixture-cache download --list` — enumerate available caches
+    on the configured GitHub repo, newest version per name first.
+  - `--cache-root PATH` — override the install root (default:
+    `$ADMIXTURE_CACHE_ROOT` or `~/.admixture-cache/caches/`).
+  - `--cache-version vN` — pin a specific version instead of latest.
+  - `--github-repo OWNER/REPO` — query a fork instead of
+    `carstenerickson/admixture-cache`.
+  - `--force` — overwrite an existing install at the target path.
+  - `--quiet` — suppress the streaming progress bar.
+- **Streaming download with on-the-fly SHA-256 verification.**
+  The tarball is hashed as it's read; memory footprint is bound by
+  the 64 KiB chunk size, not the tarball size (caches can be many
+  GB). A mismatched sha256 is detected before extraction and the
+  partial tempfile is unlinked.
+- **Atomic install pattern.** Downloads land in a tempfile inside
+  `cache_root`; extraction goes into a sibling
+  `.<name>.extract-<uuid>` dir; manifest is loaded for validation;
+  ONLY THEN is the directory renamed into the target. A
+  pre-existing install at the target (with `--force`) is renamed
+  aside first, then removed after the new install succeeds. No
+  partial state survives a mid-download crash.
+- **`docs/PUBLISH_CACHE.md`** — operator runbook for cutting a
+  canonical-cache release. Covers tag convention
+  (`cache-<name>-<version>`), tarball layout (flat or wrapped, both
+  supported), `.sha256` file format (bare hex or sha256sum-style),
+  release notes content guidance, plus an optional GitHub Actions
+  snippet for automated publish-on-tag.
+
+### Test coverage
+
+- 23 new unit tests in `tests/unit/test_distribution.py`. Covers:
+  default cache-root resolution + `$ADMIXTURE_CACHE_ROOT` override;
+  flat vs. wrapped tarball extraction; manifest-root detection
+  (single-wrapper vs. ambiguous); sha256 file parsing (bare hex +
+  sha256sum format); release filtering (tag mismatch, missing
+  asset); HTTP error wrapping; force-overwrite semantics; pinned
+  version selection; progress callback invocation; partial-install
+  cleanup on failure.
+- 6 new CLI tests in `tests/unit/test_cli.py` (replaced the v1.0
+  placeholder): no-name-no-list rejection; `--list` rendering;
+  `--list` empty-result handling; `download_cache` invocation with
+  forwarded kwargs; PanelCacheError → exit 1 mapping.
+- Total test count: 289 unit (default `pytest`) + 10 integration
+  (opt-in) = 299 (up from 272 in v1.2.0).
+
+### Public API surface
+
+- 3 new exports from `admixture_cache.__all__`: `download_cache`,
+  `list_available_caches`, `CacheRelease`.
+- No changes to existing exports; no library code paths changed.
+
 ## [1.2.0] - 2026-05-26
 
 End-to-end integration testing against real ADMIXTURE + plink2
@@ -263,7 +337,8 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.0.0...v1.1.0

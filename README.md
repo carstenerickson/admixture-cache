@@ -85,10 +85,18 @@ admixture-cache verify \
     --k 21 \
     --cache-dir data/regional_k21_cache/
 
-# 4. (Future) pull a canonical published cache. Placeholder until v1.0
-#    canonical-release artifacts ship.
-admixture-cache download regional-k21-aadr-v66-ho
+# 4. Fetch a canonical published cache from GitHub Releases.
+admixture-cache download --list                            # enumerate
+admixture-cache download regional_k21_aadr_v66_ho          # install
+admixture-cache download regional_k21_aadr_v66_ho \
+    --cache-root ~/.admixture-cache/caches \
+    --cache-version v2 \
+    --force                                                # pin + overwrite
 ```
+
+Caches install at `<cache-root>/<name>/` (default: `~/.admixture-cache/caches/`, or `$ADMIXTURE_CACHE_ROOT` if set). The downloader streams the tarball, verifies its SHA-256, validates the extracted manifest, and atomically renames into place — partial downloads never leave a half-installed cache.
+
+Publishing your own canonical caches: see [docs/PUBLISH_CACHE.md](docs/PUBLISH_CACHE.md) for the tag convention + tarball format the discovery code expects.
 
 The default `SubprocessToolRunner` runs the local `admixture` / `plink2` binaries on `PATH`; override with `--admixture-binary` / `--plink2-binary` to point at a specific build.
 

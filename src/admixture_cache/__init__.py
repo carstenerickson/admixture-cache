@@ -30,6 +30,11 @@ from admixture_cache.alignment import (
     extract_target_dosage_via_plink2,
 )
 from admixture_cache.builder import build_panel_cache, ld_prune_panel
+from admixture_cache.distribution import (
+    CacheRelease,
+    download_cache,
+    list_available_caches,
+)
 from admixture_cache.errors import PanelCacheError, PopAutomationConfigError
 from admixture_cache.io import (
     load_cache_manifest,
@@ -45,7 +50,7 @@ from admixture_cache.projection import (
 )
 from admixture_cache.runner import ToolRunner
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     # Public API — cache build (slow, one-time)
@@ -62,9 +67,13 @@ __all__ = [
     "load_cache_manifest",
     "verify_cache_matches_current_config",
     "sha256_file",
+    # Public API — canonical cache distribution
+    "download_cache",
+    "list_available_caches",
     # Schemas
     "PanelCacheManifest",
     "ProjectionResult",
+    "CacheRelease",
     # Error type
     "PanelCacheError",
     # Back-compat alias for the upstream source-of-extraction; kept

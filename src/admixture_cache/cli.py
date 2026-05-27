@@ -224,14 +224,90 @@ def _cmd_verify(ns: argparse.Namespace) -> int:
 
 
 def _cmd_download(ns: argparse.Namespace) -> int:
-    print(
-        "admixture-cache download: canonical published caches are not yet "
-        "available. Track release progress at "
-        "https://github.com/carstenerickson/admixture-cache/releases. "
-        f"(Requested: {ns.name!r})",
-        file=sys.stderr,
+    from admixture_cache.distribution import (
+        CacheRelease,
+        download_cache,
+        list_available_caches,
     )
-    return 2
+
+    if ns.list_caches:
+        try:
+            releases = list_available_caches(
+                github_repo=ns.github_repo,
+            )
+        except PanelCacheError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not releases:
+            print(
+                f"No published caches at {ns.github_repo}",
+                file=sys.stderr,
+            )
+            return 0
+        # Group by name, list versions newest-first.
+        by_name: dict[str, list[CacheRelease]] = {}
+        for r in releases:
+            by_name.setdefault(r.name, []).append(r)
+        for name in sorted(by_name):
+            entries = sorted(
+                by_name[name],
+                key=lambda r: r.version_number,
+                reverse=True,
+            )
+            latest = entries[0]
+            other_versions = [r.version for r in entries[1:]]
+            mb = latest.size_bytes / (1024 * 1024)
+            extra = (
+                f" (also: {', '.join(other_versions)})"
+                if other_versions else ""
+            )
+            print(
+                f"{name}  {latest.version}  "
+                f"{mb:.1f} MB  "
+                f"{latest.published_at.date()}{extra}",
+            )
+            print(f"    {latest.html_url}")
+        return 0
+
+    if not ns.name:
+        print(
+            "error: cache name required (or pass --list to enumerate)",
+            file=sys.stderr,
+        )
+        return 2
+
+    def _progress_bar(downloaded: int, total: int) -> None:
+        # Emit a single overwriting line to stderr.
+        if total > 0:
+            pct = 100.0 * downloaded / total
+            mb_now = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            sys.stderr.write(
+                f"\r  {mb_now:6.1f} / {mb_total:6.1f} MB  {pct:5.1f}%",
+            )
+        else:
+            mb_now = downloaded / (1024 * 1024)
+            sys.stderr.write(f"\r  {mb_now:6.1f} MB downloaded")
+        sys.stderr.flush()
+
+    try:
+        target = download_cache(
+            ns.name,
+            cache_root=ns.cache_root,
+            github_repo=ns.github_repo,
+            version=ns.cache_version,
+            force=ns.force,
+            progress=_progress_bar if not ns.quiet else None,
+        )
+    except PanelCacheError as exc:
+        if not ns.quiet:
+            sys.stderr.write("\n")  # newline after progress bar
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not ns.quiet:
+        sys.stderr.write("\n")
+    print(f"Installed {ns.name} → {target}")
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -350,10 +426,53 @@ def _build_parser() -> argparse.ArgumentParser:
     # download
     p_download = sub.add_parser(
         "download",
-        help="placeholder for canonical published caches (post-v1.0).",
+        help="Fetch a canonical published cache from GitHub Releases.",
+        description=(
+            "Download a published cache to a local cache root, with "
+            "streaming SHA-256 verification. Caches install at "
+            "<cache-root>/<name>/ ready to pass as `cache_dir=...` to "
+            "`project_target`. See docs/PUBLISH_CACHE.md for the "
+            "release format if you want to publish your own caches."
+        ),
     )
-    p_download.add_argument("name", help="cache name, e.g. 'regional-k21-aadr-v66-ho'")
-    p_download.add_argument("--output-dir", type=Path, default=Path("."))
+    p_download.add_argument(
+        "name", nargs="?",
+        help=(
+            "cache name as published, e.g. 'regional_k21_aadr_v66_ho'. "
+            "Omit when passing --list."
+        ),
+    )
+    p_download.add_argument(
+        "--list", dest="list_caches", action="store_true",
+        help="list available canonical caches and exit",
+    )
+    p_download.add_argument(
+        "--cache-root", type=Path, default=None,
+        help=(
+            "where to install. Defaults to $ADMIXTURE_CACHE_ROOT, or "
+            "~/.admixture-cache/caches/ if unset."
+        ),
+    )
+    p_download.add_argument(
+        "--github-repo",
+        default="carstenerickson/admixture-cache",
+        help="owner/repo to query for releases (default: %(default)s)",
+    )
+    p_download.add_argument(
+        "--cache-version", default=None,
+        help=(
+            "specific version to install (e.g. 'v2'). Defaults to "
+            "the latest published version."
+        ),
+    )
+    p_download.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing cache at the target path",
+    )
+    p_download.add_argument(
+        "--quiet", action="store_true",
+        help="suppress the streaming progress display",
+    )
     p_download.set_defaults(func=_cmd_download)
 
     return parser

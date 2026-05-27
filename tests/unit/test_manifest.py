@@ -45,36 +45,63 @@ class TestManifestSchema:
         assert m.continent is None
         assert isinstance(m.build_timestamp, datetime)
 
-    def test_valid_ancestral_cluster_requires_continent(self) -> None:
-        m = PanelCacheManifest(
-            **_good_manifest_kwargs(track="ancestral_cluster", continent="Europe"),  # type: ignore[arg-type]
-        )
-        assert m.continent == "Europe"
+    @pytest.mark.parametrize("track", [
+        # Legacy enum values that were enforced pre-v1.4.
+        "regional",
+        "continental_admixture",
+        "ancestral_cluster",
+        # Operator-chosen labels.
+        "my_polygenic_score_pipeline",
+        "anything_goes",
+        # Boundary cases — pydantic `str | None` puts no constraint
+        # on string contents, so all of these are valid free-text.
+        "",                          # empty string
+        "x" * 10000,                 # very long
+        "日本語のラベル",                # non-ASCII Unicode
+        "track-with-hyphens",        # hyphens
+        "track with spaces",         # spaces
+        "newline\nin\nlabel",        # control chars
+        "'; DROP TABLE--",           # SQL-injection-style
+        "../../etc/passwd",          # path-traversal-style
+    ])
+    def test_track_is_free_text_no_validator(self, track: str) -> None:
+        """v1.4 dropped the enum constraint on `track`. ANY string is
+        accepted; the library doesn't interpret it.
 
-    def test_ancestral_cluster_without_continent_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="requires continent"):
-            PanelCacheManifest(
-                **_good_manifest_kwargs(track="ancestral_cluster"),  # type: ignore[arg-type]
-            )
-
-    def test_non_ancestral_cluster_with_continent_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="must have continent=None"):
-            PanelCacheManifest(
-                **_good_manifest_kwargs(track="regional", continent="Europe"),  # type: ignore[arg-type]
-            )
-
-    def test_unknown_track_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="not one of"):
-            PanelCacheManifest(**_good_manifest_kwargs(track="bogus"))  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize(
-        "track",
-        ["regional", "continental_admixture"],
-    )
-    def test_valid_non_continent_tracks(self, track: str) -> None:
+        The parametrize list covers the legacy enum values (for
+        back-compat), conventional operator labels, and edge-case
+        strings (empty, oversize, Unicode, control chars, SQLi-style,
+        path-traversal-style) — none of which should raise. If a
+        future regression adds a validator, it'll likely trip on at
+        least one of these and fail the test."""
         m = PanelCacheManifest(**_good_manifest_kwargs(track=track))  # type: ignore[arg-type]
         assert m.track == track
+
+    def test_track_optional_defaults_to_none(self) -> None:
+        """Consumers that don't care about tagging can omit `track`."""
+        kwargs = _good_manifest_kwargs()
+        del kwargs["track"]
+        m = PanelCacheManifest(**kwargs)  # type: ignore[arg-type]
+        assert m.track is None
         assert m.continent is None
+
+    def test_continent_no_longer_coupled_to_track(self) -> None:
+        """v1.4 dropped the validator that tied continent to track.
+        Any combination of the two free-text labels is valid."""
+        combos = [
+            ("regional", "Europe"),
+            ("ancestral_cluster", None),
+            ("regional", None),
+            ("ancestral_cluster", "Asia"),
+            (None, "Africa"),  # continent without track
+            ("custom_label", "custom_continent"),
+        ]
+        for track, continent in combos:
+            m = PanelCacheManifest(
+                **_good_manifest_kwargs(track=track, continent=continent),  # type: ignore[arg-type]
+            )
+            assert m.track == track
+            assert m.continent == continent
 
     def test_extra_field_forbidden(self) -> None:
         with pytest.raises(ValidationError):
@@ -264,8 +291,10 @@ class TestVerifyCacheMatchesCurrentConfig:
 class TestManifestRequiredFields:
     @pytest.mark.parametrize(
         "missing",
+        # `track` removed in v1.4 — now optional free-text provenance.
+        # `continent` was already optional.
         [
-            "track", "panel_id", "panel_version", "panel_bim_sha256",
+            "panel_id", "panel_version", "panel_bim_sha256",
             "clusters_yaml_sha256", "k", "admixture_version", "seeds_used",
             "best_seed", "best_loglikelihood", "restart_sd_max",
             "cluster_order", "build_wallclock_seconds", "build_timestamp",

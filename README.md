@@ -164,9 +164,13 @@ Cache validity is determined by `manifest.json` SHAs matching the current config
 
 ## Status
 
-- **v1.0.0** — first PyPI release. Library + CLI surface frozen at this point; cache directory layout is stable at schema v1. Tracks numerical parity against stock ADMIXTURE; canonical published-cache artifacts to follow as separate GitHub releases.
+- **v1.4** — Current. Drops the consumer-specific `track` enum constraint; the `track` and `continent` manifest fields are now free-text provenance labels.
+- **v1.3** — Adds the `admixture-cache download` command + `download_cache` / `list_available_caches` / `CacheRelease` Python API. Canonical caches are published as GitHub Releases following the `cache-<name>-<version>` tag convention (see `docs/PUBLISH_CACHE.md`).
+- **v1.2** — End-to-end integration suite against real ADMIXTURE 1.4 + plink2.
+- **v1.1** — NUMA pinning, PGEN target format support, Hypothesis property tests.
+- **v1.0** — First PyPI release. Cache directory layout stable at schema v1; numerical parity validated against stock ADMIXTURE.
 
-See [CHANGELOG.md](CHANGELOG.md) for the per-release detail.
+See [CHANGELOG.md](CHANGELOG.md) for the full per-release detail.
 
 ## Contributing
 

@@ -188,9 +188,11 @@ One file per restart, named `restart_<seed>.out`, containing the ADMIXTURE proce
 
 `best = max(with_ll, key=lambda r: r["ll"])` picks the highest LL. Ties go to Python's `max` first-in-iteration-order tiebreak; since `per_restart_results` is sorted by seed before the LL filter, ties resolve to the LOWEST-seed restart. This means re-runs of the same build with the same seeds produce byte-identical caches even when multiple restarts hit the same LL (rare but possible at K≥21 on heavily-pruned panels).
 
-### Where pydantic validation actually fires
+### Where pydantic validation fires
 
-The track/continent consistency validator (`manifest._validate_track_continent_consistency`) runs at `PanelCacheManifest(...)` construction, which happens at the END of `build_panel_cache` — after all N ADMIXTURE restarts have completed (hours of work). A build called with `track="ancestral_cluster"` but `continent=None` runs to completion, then raises `ValidationError` at manifest write. The CLI catches this in `_cmd_build` by checking the argparse-validated namespace BEFORE invoking the library, so `admixture-cache build` fails fast. **Library-level callers don't get this short-circuit** — if you're building a higher-level wrapper, mirror the early check.
+Pydantic validates field types, required-field presence, and `extra="forbid"` at `PanelCacheManifest(...)` construction. There is currently no custom model_validator — the v1.0 track/continent consistency validator was dropped in v1.4 because the constraint encoded a specific consumer's vocabulary (ancestry-pipeline's three tracks) into the library schema. `track` and `continent` are now free-text provenance labels stored but not interpreted.
+
+If a future change adds a model_validator that depends on the cache's actual content (rather than just on the manifest fields), follow the v1.0-era pattern: detect the invariant violation in the CLI's argparse handler BEFORE invoking `build_panel_cache`, so a multi-hour ADMIXTURE build doesn't run to completion only to fail at manifest write. The library propagates the `ValidationError` as-is — wrapping is a CLI concern.
 
 ## Schema evolution
 
@@ -467,20 +469,19 @@ Why the values in `build_panel_cache`'s signature are what they are:
 
 Changing any of these is a behavior change worth a CHANGELOG note.
 
-## Adding a new track
+## Using `track` and `continent` for provenance
 
-The `track` field on `PanelCacheManifest` is an enum-like string. Currently allowed: `"regional"`, `"continental_admixture"`, `"ancestral_cluster"`. To add a new track (e.g. `"global_pca"`):
+`track` and `continent` on `PanelCacheManifest` are **free-text provenance labels** the library stores but doesn't interpret (since v1.4 — earlier versions enforced a three-value enum + a continent-required-only-for-ancestral_cluster rule, which encoded ancestry-pipeline's vocabulary into the library schema).
 
-1. **`manifest.py`**: update `_validate_track_continent_consistency` to accept the new value. Decide whether the new track requires `continent` to be set (like `ancestral_cluster`) or must NOT be set (like the other two), and add the corresponding branch.
-2. **`manifest.py`**: update the docstring of the `track` field.
-3. **`cli.py`**: update the `--track` argparse `choices=[...]` list in `_cmd_build`'s parser.
-4. **`cli.py`**: update `_cmd_build`'s early track/continent validation if the new track has a continent-related constraint.
-5. **`tests/unit/test_manifest.py`**: add a test case to `TestTrackContinentConsistency` for valid and invalid combinations of the new track.
-6. **`tests/unit/test_cli.py`**: add a CLI smoke test for the new `--track` value.
-7. **`CHANGELOG.md`**: under `[Unreleased]`, note the new track in `### Added`.
-8. **`README.md`**: if the new track has user-facing semantic implications, document them in the Quickstart or a new section.
+Use them however your consumer needs:
 
-The track value flows opaquely through `build_panel_cache` and is stored in `manifest.track`; no other module branches on its value. So the new track is observable to consumers but doesn't change build behavior — keep it that way unless there's a strong reason.
+- `track="regional"`, `track="continental_admixture"`, `track="ancestral_cluster"` — the three legacy values, still supported (just not enforced).
+- `track="my_polygenic_score_pipeline"`, `track="qc_validation_panel"`, etc. — any string label you find useful when browsing a `cache_root/` six months later.
+- Omit `track=` entirely if you don't need a label — defaults to `None`.
+
+The library doesn't branch on these values anywhere. If your consumer needs to dispatch on track (e.g. ancestry-pipeline's routing logic), do that at YOUR boundary, not inside the library. A higher-level wrapper can enforce its own enum + validation rules without forcing the library to.
+
+`verify_cache_matches_current_config` doesn't consider `track` or `continent` — only SHA-pinned fields (panel.bim, clusters.yaml, K, geo-filter YAMLs) gate cache validity. Re-tagging a cache (e.g. renaming `track` between builds) doesn't invalidate it.
 
 ## Debugging a failed build
 

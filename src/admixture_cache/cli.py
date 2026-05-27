@@ -105,24 +105,10 @@ def _parse_geo_filter_yamls(values: list[str]) -> dict[str, str]:
 
 
 def _cmd_build(ns: argparse.Namespace) -> int:
-    # Early track/continent validation. Surfacing the inconsistency
-    # before launching ADMIXTURE saves ~hours of wasted compute that
-    # would otherwise be undone by the manifest's model_validator at
-    # write-time.
-    if ns.track == "ancestral_cluster" and ns.continent is None:
-        print(
-            "error: --track=ancestral_cluster requires --continent",
-            file=sys.stderr,
-        )
-        return 2
-    if ns.track != "ancestral_cluster" and ns.continent is not None:
-        print(
-            f"error: --continent is only valid with --track=ancestral_cluster "
-            f"(got --track={ns.track})",
-            file=sys.stderr,
-        )
-        return 2
-
+    # Pre-v1.4 had an early track/continent validation block here
+    # mirroring the library's model_validator. Both are gone in v1.4:
+    # `track` and `continent` are free-text provenance labels, the
+    # library doesn't interpret them, and the CLI shouldn't either.
     admixture_version = ns.admixture_version
     if admixture_version is None:
         detected = _detect_admixture_version(ns.admixture_binary)
@@ -279,7 +265,11 @@ def _cmd_download(ns: argparse.Namespace) -> int:
     def _progress_bar(downloaded: int, total: int) -> None:
         # Emit a single overwriting line to stderr.
         if total > 0:
-            pct = 100.0 * downloaded / total
+            # Clamp to 100% — servers occasionally under-report
+            # Content-Length, which would otherwise produce a
+            # confusing "120.0%" display. SHA verification still
+            # catches the actual integrity question.
+            pct = min(100.0, 100.0 * downloaded / total)
             mb_now = downloaded / (1024 * 1024)
             mb_total = total / (1024 * 1024)
             sys.stderr.write(
@@ -334,14 +324,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--k", type=int, required=True)
     p_build.add_argument("--cache-dir", type=Path, required=True)
     p_build.add_argument(
-        "--track", required=True,
-        choices=["regional", "continental_admixture", "ancestral_cluster"],
+        "--track", default=None,
+        help=(
+            "free-text provenance label (e.g. 'regional', "
+            "'continental_admixture', 'ancestral_cluster', or any "
+            "string). Stored in the manifest, not interpreted by "
+            "the library."
+        ),
     )
     p_build.add_argument("--panel-id", required=True)
     p_build.add_argument("--panel-version", required=True)
     p_build.add_argument(
         "--continent", default=None,
-        help="required when --track=ancestral_cluster",
+        help=(
+            "free-text provenance label paired with --track for "
+            "consumers that want finer-grained categorization. "
+            "Stored in the manifest, not interpreted."
+        ),
     )
     p_build.add_argument(
         "--seeds", default=None,

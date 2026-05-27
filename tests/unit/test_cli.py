@@ -555,24 +555,58 @@ class TestBuildCommandTrackContinent:
             "--admixture-version", "1.4.0",
         ]
 
-    def test_ancestral_cluster_without_continent_rejected(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    def test_track_accepts_any_string_no_enum_constraint(
+        self, tmp_path: Path,
     ) -> None:
-        rc = main(
-            [*self._common_args(tmp_path), "--track", "ancestral_cluster"],
-        )
-        assert rc == 2
-        assert "ancestral_cluster requires --continent" in capsys.readouterr().err
+        """v1.4 dropped argparse `choices=[...]` on --track. The
+        parser accepts any string; the library treats it as free-text
+        provenance."""
+        parser = _build_parser()
+        # Any of these now parse without raising SystemExit from
+        # argparse. (We don't actually run the build — that would need
+        # ADMIXTURE on PATH; we just verify the parser accepts these
+        # values.)
+        for track in [
+            "regional", "ancestral_cluster", "my_polygenic_score",
+            "custom_label_with_underscores",
+        ]:
+            ns = parser.parse_args([
+                "build",
+                "--panel-bed", str(tmp_path / "panel.bed"),
+                "--panel-pop", str(tmp_path / "panel.pop"),
+                "--clusters-yaml", str(tmp_path / "c.yaml"),
+                "--k", "3",
+                "--cache-dir", str(tmp_path / "cache"),
+                "--track", track,
+                "--panel-id", "p1",
+                "--panel-version", "v1",
+                "--admixture-version", "1.4.0",
+            ])
+            assert ns.track == track
 
-    def test_continent_without_ancestral_cluster_rejected(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    def test_track_and_continent_independent_no_constraint(
+        self, tmp_path: Path,
     ) -> None:
-        rc = main(
-            [*self._common_args(tmp_path),
-             "--track", "regional", "--continent", "Europe"],
-        )
-        assert rc == 2
-        assert "only valid with --track=ancestral_cluster" in capsys.readouterr().err
+        """v1.4: any combination of --track + --continent parses;
+        the library doesn't enforce either being set or any pairing."""
+        parser = _build_parser()
+        # Continent set without track=ancestral_cluster — was rejected
+        # pre-v1.4, now accepted.
+        ns = parser.parse_args([
+            "build",
+            "--panel-bed", str(tmp_path / "panel.bed"),
+            "--panel-pop", str(tmp_path / "panel.pop"),
+            "--clusters-yaml", str(tmp_path / "c.yaml"),
+            "--k", "3",
+            "--cache-dir", str(tmp_path / "cache"),
+            "--track", "regional",
+            "--continent", "Europe",
+            "--panel-id", "p1",
+            "--panel-version", "v1",
+            "--admixture-version", "1.4.0",
+        ])
+        assert ns.track == "regional"
+        assert ns.continent == "Europe"
 
 
 class TestPopAutomationConfigErrorReexport:

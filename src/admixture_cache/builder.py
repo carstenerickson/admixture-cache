@@ -148,7 +148,7 @@ def build_panel_cache(
     k: int,
     cache_dir: Path,
     admixture_runner: ToolRunner,
-    track: str,
+    track: str | None = None,
     panel_id: str,
     panel_version: str,
     admixture_version: str,

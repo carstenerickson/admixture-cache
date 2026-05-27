@@ -33,18 +33,19 @@ letters, digits, underscores. Hyphens are tolerated but underscores
 are preferred (`cache-<name>-<version>` splits on the *last* hyphen,
 so name-internal hyphens parse but look messy).
 
-The name should encode:
+The name is **operator-chosen and free-text** — admixture-cache doesn't interpret it. A naming scheme that humans can grep through six months from now is what matters. Suggested format:
 
-1. **Track** (`regional`, `continental_admixture`, `ancestral_cluster`)
+1. **Track or purpose label** — `regional`, `continental_admixture`, `ancestral_cluster`, or any string that fits your pipeline's vocabulary (e.g. `my_polygenic_score_pipeline`). The manifest's `track` field is free-text since v1.4.
 2. **K value** (e.g. `k21`, `k4`)
 3. **Panel source** (e.g. `aadr_v66_ho`, `hgdp_1kgp`)
-4. **Continent / scope** (for ancestral_cluster only)
+4. **Scope** — anything finer-grained you need (continent, region, cohort filter, etc.)
 
-Examples:
+Examples that follow the convention:
 
 - `regional_k21_aadr_v66_ho`
 - `continental_admixture_k4_hgdp_1kgp`
 - `ancestral_cluster_k4_aadr_v66_w_eurasia`
+- `my_pgs_k8_internal_panel_v3` — any operator-meaningful string works
 
 ## Version numbers
 

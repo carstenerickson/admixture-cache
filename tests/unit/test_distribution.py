@@ -12,6 +12,8 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
+import time
 import urllib.error
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,22 +134,26 @@ def _patch_urlopen_chain(monkeypatch: pytest.MonkeyPatch,
 
     `responses` maps URL → bytes (or callable that returns bytes given
     the request URL). Unknown URLs raise URLError.
+
+    URL matching is query-string-tolerant: a registered URL of
+    ``https://api.github.com/.../releases`` matches a request to
+    ``https://api.github.com/.../releases?per_page=100``. This way
+    distribution.py can append API parameters without forcing every
+    test to know about them.
     """
     def fake_urlopen(req_or_url: Any, *_args: Any, **_kw: Any) -> MagicMock:
         url = req_or_url if isinstance(req_or_url, str) else req_or_url.full_url
-        if url not in responses:
+        base_url = url.split("?", 1)[0]
+        if url in responses:
+            payload = responses[url]
+        elif base_url in responses:
+            payload = responses[base_url]
+        else:
             raise urllib.error.URLError(f"unexpected URL {url}")
-        payload = responses[url]
         mock = MagicMock()
         mock.__enter__ = lambda self: mock
         mock.__exit__ = lambda *a: None
-        mock.read.side_effect = lambda *args: (
-            payload if not args else (
-                payload[:args[0]] if args[0] else b""
-            )
-        )
-        # For streaming, we need read(chunk) to return slices. Build
-        # a stateful reader instead.
+        # Stateful reader so streaming `resp.read(chunk)` works.
         state = {"pos": 0}
 
         def read(size: int = -1) -> bytes:
@@ -160,8 +166,13 @@ def _patch_urlopen_chain(monkeypatch: pytest.MonkeyPatch,
             return chunk
 
         mock.read.side_effect = read
+        # `headers.get("Link", "")` returns empty so the paginator
+        # terminates after one page. `Content-Length` reflects the
+        # canned payload length so progress + Content-Length
+        # validation work as the production code expects.
         mock.headers.get = lambda key, default=None: {
             "Content-Length": str(len(payload)),
+            "Link": "",
         }.get(key, default)
         return mock
 
@@ -511,3 +522,181 @@ class TestCacheReleaseDataclass:
             html_url="", notes="",
         )
         assert r.version_number == 17
+
+
+class TestNameValidationGuard:
+    """`download_cache(name=...)` from the Python API accepts arbitrary
+    strings; the guard enforces flat-directory-identifier semantics."""
+
+    @pytest.mark.parametrize("bad_name", [
+        # `..` traversal (single or multi-segment).
+        "../escapes",
+        "../../etc/passwd",
+        # Path separators that would create unwanted nesting.
+        "subdir/../escape",
+        "a/b/c",
+        "a\\b\\c",
+        # Reserved values.
+        "",
+        ".",
+        "..",
+        # Hidden — reserved for our tempfile/lockfile pattern.
+        ".secret_cache",
+        # Absolute path.
+        "/etc/evil",
+        "/tmp/somewhere",
+    ])
+    def test_invalid_names_rejected(
+        self, monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path, bad_name: str,
+    ) -> None:
+        # No mocks: the guard fires BEFORE any network I/O.
+        with pytest.raises(
+            PanelCacheError,
+            match=r"not a valid cache identifier|resolves outside",
+        ):
+            download_cache(bad_name, cache_root=tmp_path)
+
+
+class TestFindManifestRootMacOSResourceFork:
+    """`__MACOSX/` resource-fork siblings (from macOS Finder
+    Compress→unzip→tar pipelines) shouldn't trip the 'ambiguous
+    layout' branch."""
+
+    def test_macosx_sibling_filtered(self, tmp_path: Path) -> None:
+        from admixture_cache.distribution import _find_manifest_root
+
+        # Real wrapper dir.
+        wrapper = tmp_path / "regional_k21"
+        wrapper.mkdir()
+        (wrapper / "manifest.json").write_text("{}")
+        # macOS resource-fork sibling — should be filtered out.
+        macosx = tmp_path / "__MACOSX"
+        macosx.mkdir()
+        (macosx / "._regional_k21").write_text("metadata")
+
+        root = _find_manifest_root(tmp_path)
+        assert root == wrapper
+
+    def test_dotfile_sibling_filtered(self, tmp_path: Path) -> None:
+        """Hidden dot-named dirs (e.g. `.git/`, `.DS_Store/`) also
+        filtered — they're not ours."""
+        from admixture_cache.distribution import _find_manifest_root
+
+        wrapper = tmp_path / "cache"
+        wrapper.mkdir()
+        (wrapper / "manifest.json").write_text("{}")
+        hidden = tmp_path / ".hidden_dir"
+        hidden.mkdir()
+
+        root = _find_manifest_root(tmp_path)
+        assert root == wrapper
+
+
+class TestConcurrentInstallLock:
+    """`_exclusive_lock` serializes concurrent `download_cache()` calls
+    on the same name. Verified by attempting two acquisitions of the
+    same lock file — the second blocks until the first releases."""
+
+    def test_lock_serializes_holders(self, tmp_path: Path) -> None:
+        from admixture_cache.distribution import _exclusive_lock
+
+        lock_path = tmp_path / ".test.lock"
+        order: list[str] = []
+
+        def first_holder() -> None:
+            with _exclusive_lock(lock_path):
+                order.append("first_acquired")
+                # Hold briefly so `second_holder` has time to block.
+                time.sleep(0.1)
+                order.append("first_released")
+
+        def second_holder() -> None:
+            # Start slightly after first_holder so it acquires first.
+            time.sleep(0.02)
+            with _exclusive_lock(lock_path):
+                order.append("second_acquired")
+
+        t1 = threading.Thread(target=first_holder)
+        t2 = threading.Thread(target=second_holder)
+        t1.start()
+        t2.start()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+        # The lock guarantees first_released < second_acquired.
+        assert order == [
+            "first_acquired", "first_released", "second_acquired",
+        ], f"unexpected order: {order}"
+
+
+class TestSlowLorisBudget:
+    """A server streaming bytes within the per-read timeout window
+    but exceeding the total wall-clock budget must trigger a
+    PanelCacheError, not hang forever."""
+
+    def test_total_wall_clock_budget_enforced(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        # 100KB tarball; budget 0.05s; chunk reads sleep 0.03s each
+        # so >2 chunks exceeds budget.
+        tarball = b"x" * (100 * 1024)
+        sha = hashlib.sha256(tarball).hexdigest()
+        api_url = f"https://api.github.com/repos/{DEFAULT_GITHUB_REPO}/releases"
+        tarball_url = "https://example.com/foo.tar.gz"
+        sha_url = "https://example.com/foo.tar.gz.sha256"
+        payload = [{
+            "tag_name": "cache-foo-v1",
+            "html_url": "", "published_at": "2026-05-26T12:00:00Z",
+            "body": "",
+            "assets": [
+                {"name": "foo.tar.gz", "size": len(tarball),
+                 "browser_download_url": tarball_url},
+                {"name": "foo.tar.gz.sha256", "size": 80,
+                 "browser_download_url": sha_url},
+            ],
+        }]
+
+        def slow_urlopen(req_or_url: Any, *_a: Any, **_kw: Any) -> MagicMock:
+            url = req_or_url if isinstance(req_or_url, str) else req_or_url.full_url
+            base = url.split("?", 1)[0]
+            if base == api_url:
+                pl: bytes = json.dumps(payload).encode()
+            elif url == sha_url:
+                pl = sha.encode("ascii")
+            elif url == tarball_url:
+                pl = tarball
+            else:
+                raise urllib.error.URLError(f"unexpected URL {url}")
+            mock = MagicMock()
+            mock.__enter__ = lambda self: mock
+            mock.__exit__ = lambda *a: None
+            state = {"pos": 0}
+
+            def read(size: int = -1) -> bytes:
+                # Slow loris: sleep before each chunk read.
+                if url == tarball_url:
+                    time.sleep(0.03)
+                start = state["pos"]
+                chunk = pl[start:start + size] if size > 0 else pl[start:]
+                state["pos"] = start + len(chunk)
+                return chunk
+
+            mock.read.side_effect = read
+            mock.headers.get = lambda key, default=None: {
+                "Content-Length": str(len(pl)),
+                "Link": "",
+            }.get(key, default)
+            return mock
+
+        monkeypatch.setattr(
+            "admixture_cache.distribution.urllib.request.urlopen",
+            slow_urlopen,
+        )
+        monkeypatch.setenv(
+            "ADMIXTURE_CACHE_DOWNLOAD_BUDGET_SECONDS", "0.05",
+        )
+
+        with pytest.raises(PanelCacheError, match="wall-clock budget"):
+            download_cache(
+                "foo", cache_root=tmp_path / "root",
+            )

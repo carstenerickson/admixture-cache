@@ -7,6 +7,164 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-27
+
+Two coordinated changes shipped together:
+
+1. **Schema cleanup.** `track` and `continent` were enforced as a
+   three-value enum + a continent-required-only-for-ancestral_cluster
+   rule — vocabulary borrowed from one specific consumer
+   (ancestry-pipeline). They're now free-text provenance labels.
+2. **Distribution-layer hardening.** Code review of v1.3 + v1.4
+   surfaced 15 findings (1 Python-version floor, 1 missing GitHub
+   API pagination, 4 medium-severity download_cache correctness
+   issues, 9 polish items). All addressed.
+
+API surface unchanged; manifest schema unchanged. Migration is
+zero-op for existing callers + existing caches.
+
+### Changed (schema cleanup, non-breaking)
+
+- **`PanelCacheManifest.track` is now optional + free-text.** Was
+  `track: str` with a `model_validator` enforcing
+  `track ∈ {regional, continental_admixture, ancestral_cluster}`;
+  now `track: str | None = None` with no validator. Any string
+  (including `None` and `""`) is accepted. Existing manifests
+  using the three legacy values still load — they're just no longer
+  constrained.
+- **`PanelCacheManifest.continent` no longer coupled to `track`.**
+  The `_validate_track_continent_consistency` model_validator that
+  required `continent` to be set iff `track == "ancestral_cluster"`
+  is gone. Either field can be set or omitted independently.
+- **CLI `admixture-cache build --track` argparse `choices=[...]`
+  constraint dropped.** Was rejecting unknown strings at parse time;
+  now accepts any string. The early track/continent validation block
+  in `_cmd_build` (which mirrored the library's now-removed
+  model_validator) is also gone.
+- **`build_panel_cache` keyword arg `track: str` → `track: str | None
+  = None`.** Callers can omit it entirely.
+
+#### Why
+
+The three named tracks (`regional`, `continental_admixture`,
+`ancestral_cluster`) are ancestry-pipeline's routing categories,
+not library-fundamental concepts. The cache itself is just
+"supervised ADMIXTURE on a specific panel × K × clusters_yaml"
+— it doesn't care what the consumer plans to call its outputs.
+By dropping the validator, the library stays purely about the
+caching mechanics; consumers attach their own semantics at their
+boundary.
+
+#### Migration
+
+- **No-op for existing caches.** Every cache built under
+  v1.0–v1.3 has `track ∈ {regional, continental_admixture,
+  ancestral_cluster}` — all three remain valid free-text values.
+  Loading old manifests is unchanged.
+- **No-op for existing callers.** `build_panel_cache(track="regional", ...)`
+  still works. `admixture-cache build --track regional` still works.
+- **New flexibility.** Custom track labels (`track="my_pgs_pipeline"`,
+  `track=None`) now accepted by both the library and the CLI.
+- **Schema version unchanged** (still `schema_version=1`). No
+  forward-compat hazard: old code reading new manifests sees the
+  same field types, just with a wider value space.
+
+#### Out-of-band consumer note
+
+Anyone who relied on the v1.0–v1.3 validator catching typos like
+`track="regoinal"` should add that validation at their own
+boundary (a typed enum, an `Annotated[str, AfterValidator(...)]`
+field on their own model, etc.). The library no longer offers that
+service.
+
+### Fixed (distribution-layer hardening)
+
+#### Correctness
+
+- **Python floor bumped to `>=3.11.4`** (was `>=3.11`).
+  `distribution.py:_safe_extract_tarball` uses PEP-706 `filter="data"`
+  which was backported to 3.11.4. pip now refuses to install on
+  3.11.0–3.11.3 instead of letting users hit a confusing `TypeError`
+  mid-extract.
+- **`list_available_caches` follows GitHub Releases pagination**
+  via `?per_page=100` + `Link: rel="next"` header parsing. Repos
+  with >30 releases no longer silently hide older cache versions.
+- **`download_cache` acquires `fcntl.flock`** on
+  `<cache_root>/.<name>.lock` for the install duration, serializing
+  concurrent calls for the same name. Two terminals running
+  `admixture-cache download foo` no longer race on the final rename.
+- **`download_cache(name=...)` validates `name` as a flat directory
+  identifier** — rejects `/`, `\`, `..`, leading dots, absolute
+  paths, empty string before any network I/O. Closes the Python-API
+  path-traversal escape (`name="../evil"` would write outside
+  `cache_root`).
+- **Long-tail exception wrapping.** `download_cache`'s outer
+  except now catches `http.client.HTTPException`, `tarfile.TarError`,
+  `OSError`, `ValueError` and re-raises as `PanelCacheError`. Raw
+  tracebacks no longer leak past the CLI's `except PanelCacheError`
+  on edge failures (disk full, corrupt tarball, malformed
+  Content-Length).
+- **Total wall-clock budget on `download_cache`.** Default
+  10× the per-read `timeout`, override via
+  `$ADMIXTURE_CACHE_DOWNLOAD_BUDGET_SECONDS`. A slow-loris server
+  drip-feeding bytes within the per-read timeout can no longer hold
+  the download open indefinitely.
+
+#### Robustness
+
+- **`_find_manifest_root` filters `__MACOSX/`** (macOS Finder
+  Compress artifacts) and hidden `.*` directories. Tarballs packed
+  via Finder no longer trip the "ambiguous layout" branch.
+- **tz-aware datetime fallback.** `list_available_caches` returns
+  `datetime.fromtimestamp(0, tz=UTC)` (was naive) in the
+  published_at-missing path. Mixing aware/naive datetimes in
+  `sorted(releases, key=lambda r: r.published_at)` no longer raises
+  `TypeError`.
+- **`except BaseException` cleanup.** `download_cache`'s
+  extract-dir cleanup catches `BaseException` (with re-raise) so
+  `Ctrl-C` during a multi-GB extract removes the orphan
+  `.{name}.extract-*` dir before propagating.
+- **Backup-restore-failure logging.** When `download_cache` fails
+  to install AND fails to restore the prior cache from `.old-*`,
+  the failure is now logged at ERROR level pointing operators at
+  the recoverable path (was silently `contextlib.suppress`-ed).
+
+#### Polish
+
+- **CLI `_progress_bar` clamps to 100%.** Under-reporting
+  Content-Length headers no longer render "120.0%".
+- **`_TAG_PATTERN` uses `re.fullmatch`** via `\A...\Z` anchors;
+  rejects pedantic edge cases like trailing newlines.
+- **README "Status" section rewritten** to list v1.0 → v1.4 with
+  one line each (was frozen at "v1.0.0 — first PyPI release").
+- **`docs/PUBLISH_CACHE.md` clarifies** that cache names are
+  operator-chosen free-text (the three legacy `track` values are
+  suggestions, not requirements).
+
+### Test coverage
+
+- 13-cell `test_track_is_free_text_no_validator` covers empty,
+  oversize (10K chars), Unicode, control chars,
+  SQL-injection-style, path-traversal-style strings — proves the
+  "ANY string accepted" docstring claim.
+- 6-cell `test_continent_no_longer_coupled_to_track`.
+- 4-cell `test_track_accepts_any_string_no_enum_constraint` +
+  `test_track_and_continent_independent_no_constraint`.
+- New `TestNameValidationGuard` (10 cells) — every flavor of
+  invalid `name` rejected pre-network.
+- New `TestFindManifestRootMacOSResourceFork` (2 cells) —
+  `__MACOSX/` + hidden-dir siblings filtered.
+- New `TestConcurrentInstallLock` — two threads contending for
+  `_exclusive_lock` serialize correctly (timed lock-order
+  assertion).
+- New `TestSlowLorisBudget` — slow-streaming server exceeds the
+  wall-clock budget and raises `PanelCacheError` instead of
+  hanging.
+
+Total: 312 unit tests pass (was 285); 10 integration tests pass
+against ADMIXTURE 1.4 + plink2; ruff + mypy strict + import-linter
+all green; `twine check` PASSED for sdist + wheel.
+
 ## [1.3.0] - 2026-05-26
 
 Adds the panel-cache distribution layer — `admixture-cache download`
@@ -337,7 +495,8 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.0...v1.1.1

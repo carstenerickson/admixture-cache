@@ -247,6 +247,67 @@ class TestProjectTarget:
         )
         assert result.n_snps_used == 2000
 
+    def test_recovers_q_when_target_missing_panel_snps(
+        self,
+        cache_dir: Path,
+        truth: dict,
+        tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        """Regression guard for the v1.4.1 fix (target∩panel < panel).
+
+        The other fixture targets carry 100% of the panel's SNPs, so they
+        never exercised the common real-world case where the target is missing
+        some panel variants — and that's exactly the case the old code got
+        wrong (``--extract panel.bim`` yields a dosage shorter than P, in the
+        target's order, so project_target aborted with "cached P has N SNPs but
+        aligned target dosage has M", or — at coincidental equal length —
+        silently mis-aligned the dosage row-for-row against P).
+
+        Here we drop 100 of target_pure_A's 2000 variants with ``plink2
+        --exclude`` and confirm the projection still reindexes to the full
+        panel order (NaN-filling the 100 gaps), uses only the 1900 present
+        SNPs, and recovers the known Q. This test FAILS on pre-1.4.1 code."""
+        plink2_runner = SubprocessToolRunner("plink2")
+        work_dir = Path(tmp_path) / "proj_partial"
+        (work_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+        # Drop every 20th panel SNP (100 of 2000) from the target.
+        panel_ids = [
+            line.split("\t")[1]
+            for line in (cache_dir / "panel.bim").read_text().splitlines()
+            if line.strip()
+        ]
+        dropped = panel_ids[::20]
+        drop_file = work_dir / "drop.txt"
+        drop_file.write_text("\n".join(dropped) + "\n")
+        reduced = work_dir / "target_reduced"
+        plink2_runner.run(
+            args=[
+                "--bfile", str(FIXTURES / "target_pure_A"),
+                "--exclude", str(drop_file),
+                "--make-bed", "--out", str(reduced),
+            ],
+            cwd=work_dir,
+            log_dir=work_dir / "logs",
+        )
+
+        result = project_target(
+            target_bed=reduced.with_suffix(".bed"),
+            cache_dir=cache_dir,
+            plink2_runner=plink2_runner,
+            work_dir=work_dir / "proj",
+        )
+        assert result.converged
+        # Only the SNPs the target still carries are used (NaN-filled gaps
+        # are dropped by the projection's non-missing mask).
+        assert result.n_snps_used == 2000 - len(dropped)
+        q_true = np.array(truth["targets"]["target_pure_A"])
+        max_err = float(np.max(np.abs(result.target_q - q_true)))
+        assert max_err < Q_RECOVERY_TOLERANCE, (
+            f"partial-overlap target recovered Q={result.target_q.tolist()} "
+            f"differs from truth {q_true.tolist()} by {max_err:.4f}"
+        )
+
 
 class TestCacheReuse:
     """Idempotency — second `build_panel_cache` call with matching SHAs

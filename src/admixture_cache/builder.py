@@ -197,6 +197,25 @@ def build_panel_cache(
     raises PanelCacheError after saving partial outputs for
     debugging. Cache is NOT marked valid (no manifest.json written).
 
+    Fully-labeled panels (no unlabeled '-' rows in panel_pop_file)
+    -------------------------------------------------------------
+    When every panel sample carries a cluster label, supervised
+    ADMIXTURE has no free Q to estimate: Q is pinned by the labels and
+    the build reduces to a near-closed-form per-cluster allele-frequency
+    pass that converges in ~1 iteration. Two consequences worth knowing:
+
+    - The build is fast and **seed-independent** — every restart computes
+      the identical pinned P/Q, so ``restart_sd_max`` collapses to
+      machine epsilon (~1e-16) and the multimodality check is
+      structurally vacuous (it can never fail). A surprisingly-quick
+      build (e.g. tens of seconds at K=21) on a fully-labeled panel is
+      expected, not a sign the run short-circuited.
+    - The ``seeds`` loop is therefore redundant work — all restarts are
+      byte-identical. Passing ``seeds=[1]`` is sufficient for a
+      fully-labeled panel and avoids the N× cost. (Multiple seeds only
+      buy multimodality detection, which requires unlabeled samples /
+      free Q to be meaningful.)
+
     Parameters of note
     ------------------
     threads

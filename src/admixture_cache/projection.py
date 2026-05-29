@@ -50,9 +50,23 @@ def numpy_supervised_projection(
 
     Subject to: sum(q) = 1, q_k >= 0.
 
-    Matches stock ``admixture --supervised`` Q to within ~1e-5
-    absolute on representative panels. SLSQP converges in ~9
+    Matches stock ``admixture --supervised`` Q to within ~1e-3
+    absolute on representative panels (≈0.002 max-component error on
+    a real 1.14M-SNP K=4 panel). SLSQP converges in ~10-15
     iterations / ~0.02 sec on 850K SNPs at K=4.
+
+    **Objective is the MEAN per-SNP negative log-likelihood, not the
+    sum.** The argmax is identical — scaling the objective by the
+    constant 1/M can't move the optimum — but it keeps the gradient
+    O(1) regardless of panel size. The summed form's gradient scales
+    with the SNP count (~1e6 at 1.1M SNPs); SLSQP doesn't auto-scale,
+    so against the O(1) sum-to-1 constraint Jacobian the QP subproblem
+    is badly conditioned and the optimizer stalls at a corner with
+    ``success=True`` — returning a confidently-wrong Q. Discovered
+    projecting an interior 4-way mixture against a real 1.1M-SNP panel:
+    the summed form returned ``[0, 0, 1, 0]`` (true ``[.2, .5, .25,
+    .05]``), the mean form recovers it to ~0.002. Normalizing makes
+    SLSQP's ``ftol`` behave identically at 100 SNPs and 1.1M SNPs.
 
     Returns (q, n_iter, converged).
     """
@@ -73,14 +87,21 @@ def numpy_supervised_projection(
             "SNPs after mask; cannot project (no data).",
         )
 
+    # Normalize by the observed-SNP count so the objective is the MEAN
+    # per-SNP NLL. Keeps the gradient O(1) at any panel size → SLSQP's
+    # tolerances behave the same whether M=100 or M=1.1M. See docstring.
+    inv_m = 1.0 / g_obs.size
+
     def neg_log_lik(q: np.ndarray) -> float:
         f = np.clip(P_obs @ q, eps, 1 - eps)
-        return float(-(g_obs * np.log(f) + (2 - g_obs) * np.log(1 - f)).sum())
+        return float(
+            -inv_m * (g_obs * np.log(f) + (2 - g_obs) * np.log(1 - f)).sum()
+        )
 
     def grad_neg_log_lik(q: np.ndarray) -> np.ndarray:
         f = np.clip(P_obs @ q, eps, 1 - eps)
         score = g_obs / f - (2 - g_obs) / (1 - f)
-        result: np.ndarray = -P_obs.T @ score
+        result: np.ndarray = -inv_m * (P_obs.T @ score)
         return result
 
     result = minimize(

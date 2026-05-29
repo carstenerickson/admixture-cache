@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-05-29
+
+### Fixed
+
+- **`numpy_supervised_projection` could return a confidently-wrong Q
+  with `converged=True` on large panels — CRITICAL, present in every
+  release ≤ 1.4.1.** The projection minimized the *summed* negative
+  log-likelihood, whose gradient scales with the SNP count (~1e6 at
+  1.1M SNPs). SLSQP doesn't auto-scale, so against the O(1) sum-to-1
+  constraint Jacobian the QP subproblem is badly conditioned and the
+  optimizer stalls at a simplex corner while reporting success. On the
+  real 1.14M-SNP W_Eurasia AADR panel (K=4, cluster correlations
+  ~0.85), projecting an interior mixture with true Q `[0.20, 0.50,
+  0.25, 0.05]` returned **`[0, 0, 1, 0]`** (max error 0.75) — a
+  silently garbage result, no error raised. The fix normalizes the
+  objective (and gradient) by the observed-SNP count — the **MEAN**
+  per-SNP NLL instead of the sum. The argmax is identical (scaling by
+  the constant 1/M can't move the optimum) but the gradient becomes
+  O(1) regardless of panel size, so SLSQP's tolerances behave the same
+  at 100 SNPs and 1.14M. Post-fix the same projection recovers Q to
+  within **0.0024**.
+
+  - **Why it escaped every prior release:** all unit/integration
+    fixtures used 100–2000-SNP synthetic panels, where the summed
+    gradient stays small enough that SLSQP works. The stall is an
+    emergent property of the full-scale real P — it does not reproduce
+    on any contiguous slice of the real matrix (≤500K rows are fine)
+    nor on synthetic panels up to 1.5M SNPs. It surfaced only when the
+    published 1.4.1 wheel was run against the production caches.
+  - **Impact:** any consumer projecting real targets against a
+    real ~10⁵–10⁶-SNP panel could receive a wrong Q with no failure
+    signal — most damaging for interior (admixed) targets, which are
+    precisely what an ancestral-cluster track exists to measure.
+    Single-ancestry targets near a simplex corner were more likely to
+    project correctly by luck. **Re-run any projections made with
+    ≤1.4.1 against large panels.**
+  - **Regression guard:** a white-box test
+    (`TestObjectiveNormalization`) intercepts the objective handed to
+    SLSQP and asserts it is the mean (÷M) NLL, not the sum — it fails
+    on ≤1.4.1 and needs no real data (the emergent full-scale stall
+    isn't cheaply reproducible). Plus large correlated-cluster panel
+    coverage in `TestLargePanelConditioning`.
+
+### Documentation
+
+- **`build_panel_cache` docstring documents the fully-labeled-panel
+  fast path.** When `panel_pop_file` has no unlabeled (`-`) rows,
+  supervised ADMIXTURE has no free Q to estimate and reduces to a
+  near-closed-form one-iteration per-cluster allele-frequency pass:
+  fast (tens of seconds even at K=21) and seed-independent
+  (`restart_sd_max` ≈ 1e-16, multimodality check structurally
+  vacuous). `seeds=[1]` suffices for such panels; extra seeds are
+  redundant. Surfaced while forensically confirming an 88 s K=21
+  regional cache build was legitimate, not a short-circuit.
+
 ## [1.4.1] - 2026-05-29
 
 ### Fixed
@@ -514,7 +569,9 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.2...HEAD
+[1.4.2]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.1...v1.4.2
+[1.4.1]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.1.1...v1.2.0

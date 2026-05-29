@@ -242,7 +242,15 @@ def extract_target_dosage_via_plink2(
 
 
 def _read_bim_variant_ids(bim_path: Path) -> list[str]:
-    """Return the variant IDs (column 2) of a PLINK ``.bim``, in file order."""
+    """Return the variant IDs (column 2) of a PLINK ``.bim``, in file order.
+
+    IDs are assumed unique — plink2 ``--extract`` (the upstream step that
+    produces the aligned target) already requires a unique-ID variant set,
+    and :func:`reindex_dosage_to_panel_order` builds an ID→index map that
+    would collapse duplicates. Panels exported with placeholder IDs (e.g.
+    ``.`` for unnamed variants) violate this and must be re-ID'd before
+    caching.
+    """
     ids: list[str] = []
     with bim_path.open() as fh:
         for line in fh:
@@ -273,9 +281,10 @@ def reindex_dosage_to_panel_order(
 
     Returns the reindexed float64 vector (``len == panel.bim`` variant count).
     """
-    aligned_bim = append_suffix(aligned_bed.with_suffix(""), ".bim") \
-        if aligned_bed.suffix == ".bed" \
-        else append_suffix(aligned_bed, ".bim")
+    # `with_suffix` replaces only the final extension, so it handles
+    # dotted stems correctly: target_aligned.bed → .bim, and the
+    # repo's historical edge case x.v2.bed → x.v2.bim (NOT x.bim).
+    aligned_bim = aligned_bed.with_suffix(".bim")
     target_ids = _read_bim_variant_ids(aligned_bim)
     if len(target_ids) != int(dosage.shape[0]):
         raise PanelCacheError(
@@ -287,7 +296,10 @@ def reindex_dosage_to_panel_order(
     panel_index = {vid: i for i, vid in enumerate(panel_ids)}
     full = np.full(len(panel_ids), np.nan, dtype=np.float64)
     n_placed = 0
-    for vid, value in zip(target_ids, dosage):
+    # strict=True: target_ids/dosage equal length is guaranteed by the
+    # check above, so this never raises — but it locks the invariant in
+    # case that guard is ever refactored away.
+    for vid, value in zip(target_ids, dosage, strict=True):
         j = panel_index.get(vid)
         if j is not None:
             full[j] = value

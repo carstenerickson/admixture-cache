@@ -22,6 +22,7 @@ import numpy as np
 from admixture_cache.alignment import (
     align_target_to_panel_bim,
     extract_target_dosage_via_plink2,
+    reindex_dosage_to_panel_order,
 )
 from admixture_cache.errors import PanelCacheError
 from admixture_cache.io import load_cache_manifest, load_cached_p
@@ -109,13 +110,25 @@ def project_target(
         log_dir=call_dir / "logs",
     )
 
+    # Step 3b: reindex the dosage to the FULL panel.bim variant order (= cached
+    # P's row order), NaN-filling panel SNPs the target lacks. plink2 --extract
+    # in align_target_to_panel_bim yields only target∩panel variants in the
+    # TARGET's order, so the raw dosage is both shorter than P (whenever the
+    # target misses any panel SNP — the common case) and, even at equal length,
+    # mis-aligned row-for-row against P. The SLSQP projection treats NaN as
+    # missing (see n_obs below).
+    dosage = reindex_dosage_to_panel_order(
+        dosage=dosage, aligned_bed=aligned_bed, panel_bim=panel_bim,
+    )
+
     # Step 4: load cached P
     P = load_cached_p(cache_dir, manifest.k)
     if P.shape[0] != dosage.shape[0]:
         raise PanelCacheError(
-            f"project_target: cached P has {P.shape[0]} SNPs but "
-            f"aligned target dosage has {dosage.shape[0]} — alignment "
-            f"step may have failed silently",
+            f"project_target: cached P has {P.shape[0]} SNPs but the "
+            f"panel-reindexed target dosage has {dosage.shape[0]} — the cache "
+            f"is internally inconsistent (P row count != panel.bim variant "
+            f"count); rebuild the cache",
         )
 
     # Step 5: NumPy projection

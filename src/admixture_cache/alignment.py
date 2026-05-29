@@ -241,4 +241,79 @@ def extract_target_dosage_via_plink2(
     return np.asarray(raw.iloc[0, 6:].to_numpy()).astype(np.float64)
 
 
-__all__ = ["align_target_to_panel_bim", "extract_target_dosage_via_plink2"]
+def _read_bim_variant_ids(bim_path: Path) -> list[str]:
+    """Return the variant IDs (column 2) of a PLINK ``.bim``, in file order.
+
+    IDs are assumed unique — plink2 ``--extract`` (the upstream step that
+    produces the aligned target) already requires a unique-ID variant set,
+    and :func:`reindex_dosage_to_panel_order` builds an ID→index map that
+    would collapse duplicates. Panels exported with placeholder IDs (e.g.
+    ``.`` for unnamed variants) violate this and must be re-ID'd before
+    caching.
+    """
+    ids: list[str] = []
+    with bim_path.open() as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) >= 2:
+                ids.append(parts[1])
+    return ids
+
+
+def reindex_dosage_to_panel_order(
+    *, dosage: np.ndarray, aligned_bed: Path, panel_bim: Path,
+) -> np.ndarray:
+    """Reindex a target dosage vector to the cached panel's variant order.
+
+    :func:`align_target_to_panel_bim` runs ``plink2 --extract panel.bim``,
+    which (a) keeps only the target∩panel variants — so the dosage is SHORTER
+    than the panel when the target is missing any panel SNP — and (b) preserves
+    the *target's* variant order, not the panel's. The cached ``P`` matrix is
+    in ``panel.bim`` order, so :func:`project_target` must reindex the dosage to
+    that order before projecting; otherwise the length check fails, or — worse,
+    when lengths coincidentally match — the dosage is silently mis-aligned
+    row-for-row against ``P`` and every offset SNP's allele count is projected
+    against the wrong cluster frequencies.
+
+    Builds a length-``len(panel)`` vector, ``NaN`` everywhere the target lacks
+    a panel variant (the SLSQP projection treats ``NaN`` as missing), and places
+    each target dosage at its panel-order index by matching variant ID.
+
+    Returns the reindexed float64 vector (``len == panel.bim`` variant count).
+    """
+    # `with_suffix` replaces only the final extension, so it handles
+    # dotted stems correctly: target_aligned.bed → .bim, and the
+    # repo's historical edge case x.v2.bed → x.v2.bim (NOT x.bim).
+    aligned_bim = aligned_bed.with_suffix(".bim")
+    target_ids = _read_bim_variant_ids(aligned_bim)
+    if len(target_ids) != int(dosage.shape[0]):
+        raise PanelCacheError(
+            f"reindex_dosage_to_panel_order: aligned .bim {aligned_bim} has "
+            f"{len(target_ids)} variants but the dosage vector has "
+            f"{int(dosage.shape[0])} — dosage/bim are out of sync",
+        )
+    panel_ids = _read_bim_variant_ids(panel_bim)
+    panel_index = {vid: i for i, vid in enumerate(panel_ids)}
+    full = np.full(len(panel_ids), np.nan, dtype=np.float64)
+    n_placed = 0
+    # strict=True: target_ids/dosage equal length is guaranteed by the
+    # check above, so this never raises — but it locks the invariant in
+    # case that guard is ever refactored away.
+    for vid, value in zip(target_ids, dosage, strict=True):
+        j = panel_index.get(vid)
+        if j is not None:
+            full[j] = value
+            n_placed += 1
+    logger.info(
+        "reindex_dosage_to_panel_order: placed %d/%d target variants into the "
+        "%d-variant panel order (%d panel variants missing from target → NaN)",
+        n_placed, len(target_ids), len(panel_ids), len(panel_ids) - n_placed,
+    )
+    return full
+
+
+__all__ = [
+    "align_target_to_panel_bim",
+    "extract_target_dosage_via_plink2",
+    "reindex_dosage_to_panel_order",
+]

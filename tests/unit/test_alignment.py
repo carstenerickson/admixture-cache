@@ -19,6 +19,7 @@ from admixture_cache import (
     align_target_to_panel_bim,
     extract_target_dosage_via_plink2,
 )
+from admixture_cache.alignment import reindex_dosage_to_panel_order
 
 
 class _MockRunner:
@@ -577,3 +578,78 @@ class TestProtocolConformance:
             log_dir=tmp_path / "logs",
         )
         runner.run.assert_called_once()
+
+
+class TestReindexDosageToPanelOrder:
+    """The aligned dosage (target∩panel, in TARGET order) must be reindexed
+    to the full panel.bim order (= cached P's row order), NaN-filling panel
+    SNPs the target lacks — otherwise project_target's length check fails, or
+    (at coincidentally-equal length) the dosage is mis-aligned row-for-row
+    against P and produces a silently-wrong Q vector."""
+
+    def _write_bim(self, path: Path, ids: list[str]) -> None:
+        # PLINK .bim: chr id cm bp a1 a2 — only the ID column matters here.
+        path.write_text(
+            "\n".join(f"1\t{vid}\t0\t{n + 1}\tA\tC" for n, vid in enumerate(ids))
+            + "\n",
+        )
+
+    def test_fills_missing_with_nan_and_reorders_by_id(self, tmp_path: Path) -> None:
+        # Panel order rs1..rs5; the target carries only rs3, rs1, rs4 — and in
+        # a DIFFERENT order than the panel, to prove ID-keyed placement.
+        self._write_bim(tmp_path / "panel.bim", ["rs1", "rs2", "rs3", "rs4", "rs5"])
+        aligned_bed = tmp_path / "target_aligned.bed"
+        aligned_bed.touch()
+        self._write_bim(tmp_path / "target_aligned.bim", ["rs3", "rs1", "rs4"])
+        dosage = np.array([2.0, 0.0, 1.0])  # rs3=2, rs1=0, rs4=1 (target order)
+
+        full = reindex_dosage_to_panel_order(
+            dosage=dosage, aligned_bed=aligned_bed,
+            panel_bim=tmp_path / "panel.bim",
+        )
+
+        assert full.shape == (5,)
+        assert full[0] == 0.0          # rs1
+        assert np.isnan(full[1])       # rs2 absent from target → NaN
+        assert full[2] == 2.0          # rs3
+        assert full[3] == 1.0          # rs4
+        assert np.isnan(full[4])       # rs5 absent from target → NaN
+
+    def test_full_overlap_preserves_values_in_panel_order(self, tmp_path: Path) -> None:
+        # Target has every panel SNP (no NaN) but in reverse order; output must
+        # be in PANEL order, not target order.
+        self._write_bim(tmp_path / "panel.bim", ["rs1", "rs2", "rs3"])
+        aligned_bed = tmp_path / "aligned.bed"
+        aligned_bed.touch()
+        self._write_bim(tmp_path / "aligned.bim", ["rs3", "rs2", "rs1"])
+        dosage = np.array([2.0, 1.0, 0.0])  # rs3=2, rs2=1, rs1=0
+
+        full = reindex_dosage_to_panel_order(
+            dosage=dosage, aligned_bed=aligned_bed,
+            panel_bim=tmp_path / "panel.bim",
+        )
+        np.testing.assert_array_equal(full, np.array([0.0, 1.0, 2.0]))  # panel order
+
+    def test_dotted_aligned_prefix_resolves_bim(self, tmp_path: Path) -> None:
+        # Regression (repo's append-vs-with_suffix history): a dotted aligned
+        # stem 'x.v2.bed' must resolve its bim as 'x.v2.bim', not 'x.bim'.
+        self._write_bim(tmp_path / "panel.bim", ["rs1", "rs2"])
+        aligned_bed = tmp_path / "x.v2.bed"
+        aligned_bed.touch()
+        self._write_bim(tmp_path / "x.v2.bim", ["rs2"])
+        full = reindex_dosage_to_panel_order(
+            dosage=np.array([1.0]), aligned_bed=aligned_bed,
+            panel_bim=tmp_path / "panel.bim",
+        )
+        assert np.isnan(full[0]) and full[1] == 1.0
+
+    def test_dosage_bim_length_mismatch_raises(self, tmp_path: Path) -> None:
+        self._write_bim(tmp_path / "panel.bim", ["rs1"])
+        aligned_bed = tmp_path / "aligned.bed"
+        aligned_bed.touch()
+        self._write_bim(tmp_path / "aligned.bim", ["rs1", "rs2"])  # 2 ids
+        with pytest.raises(PanelCacheError, match="out of sync"):
+            reindex_dosage_to_panel_order(
+                dosage=np.array([1.0]),  # only 1 dosage
+                aligned_bed=aligned_bed, panel_bim=tmp_path / "panel.bim",
+            )

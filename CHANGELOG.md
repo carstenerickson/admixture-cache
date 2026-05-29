@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-05-29
+
+### Fixed
+
+- **`project_target`: reindex the target dosage to the full panel variant
+  order before projection.** `align_target_to_panel_bim` runs
+  `plink2 --extract panel.bim`, which keeps only the target∩panel variants in
+  the *target's* order. Whenever the target was missing any panel SNP (the
+  common case for a real sample vs an 850K-SNP panel) the extracted dosage was
+  shorter than the cached `P` matrix and `project_target` aborted with
+  `cached P has N SNPs but aligned target dosage has M`. Even at
+  coincidentally-equal length the dosage was mis-aligned row-for-row against
+  `P`, silently projecting each offset SNP's allele count against the wrong
+  cluster frequencies. `project_target` now reindexes the dosage to the full
+  `panel.bim` order by variant ID (new `reindex_dosage_to_panel_order`),
+  NaN-filling panel SNPs absent from the target — the SLSQP projection already
+  treats NaN as missing. Surfaced projecting HG00096 (≈579.3K of 579.7K panel
+  SNPs) against a regional cache.
+
 ## [1.4.0] - 2026-05-27
 
 Two coordinated changes shipped together:

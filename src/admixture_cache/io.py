@@ -3,7 +3,7 @@
 Read-side counterparts to :mod:`admixture_cache.builder`: load the
 cached P matrix, load + validate the manifest JSON, and check whether
 the cache matches the current config (panel SHA, clusters YAML SHA,
-K, optional geo-filter YAMLs).
+K, optional geo-filter YAMLs, optional panel.pop SHA).
 
 Mismatch is reported as ``(False, reason)`` so callers can log the
 specific SHA divergence rather than chasing a generic "cache invalid".
@@ -62,12 +62,21 @@ def verify_cache_matches_current_config(
     expected_clusters_yaml_sha256: str,
     expected_k: int,
     expected_geo_filter_yaml_shas: dict[str, str] | None = None,
+    expected_panel_pop_sha256: str | None = None,
 ) -> tuple[bool, str]:
     """Check whether cache_dir's manifest matches the current config.
 
     Returns (matched, reason). If matched is False, the reason string
     explains which SHA diverged (for actionable error messages /
     rebuild script logging).
+
+    ``expected_panel_pop_sha256`` is an optional direct guard on the
+    supervised-label .pop file. It is compared **only when both** the
+    caller supplies it and the cache recorded one — a legacy cache
+    (``panel_pop_sha256 is None``) is never invalidated on this basis
+    alone, and a caller that passes ``None`` opts out. See the inline
+    comment below for why this is lenient where the geo-filter check
+    is strict.
     """
     try:
         manifest = load_cache_manifest(cache_dir)
@@ -81,6 +90,24 @@ def verify_cache_matches_current_config(
         )
     if manifest.panel_bim_sha256 != expected_panel_bim_sha256:
         return False, "panel .bim changed (panel version bump?)"
+    # panel.pop direct guard. Unlike the panel .bim / geo-filter checks
+    # this is LENIENT on None: a cache built before panel_pop_sha256
+    # existed records None, and we decline to force a (potentially
+    # many-hour) rebuild of every legacy cache for a defense-in-depth
+    # check it never opted into. We flag a mismatch only when BOTH the
+    # cache pinned a sha AND the caller supplied one — exactly the case
+    # this targets: a cache built WITH the field whose panel.pop was
+    # later edited off-pipeline while panel.bim / clusters / K / geo all
+    # stayed put. (The geo-filter check below is stricter because a
+    # missing geo pin is itself a config signal — "built without that
+    # filter" — whereas a missing panel.pop sha only means "predates the
+    # field", not "no labels".)
+    if (
+        expected_panel_pop_sha256 is not None
+        and manifest.panel_pop_sha256 is not None
+        and manifest.panel_pop_sha256 != expected_panel_pop_sha256
+    ):
+        return False, "panel.pop changed (supervised labels edited?)"
     if manifest.clusters_yaml_sha256 != expected_clusters_yaml_sha256:
         return False, "clusters_yaml changed (curator edit?)"
     # Geo-filter SHA comparison is symmetric: both directions must

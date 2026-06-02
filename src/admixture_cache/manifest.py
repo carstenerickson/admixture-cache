@@ -2,7 +2,8 @@
 
 The manifest is the authoritative "this cache is valid" signal — it
 records the SHAs of every input that should determine cache validity
-(panel .bim, clusters YAML, optional geo-filter YAMLs, K), plus the
+(panel .bim, panel .pop, clusters YAML, optional geo-filter YAMLs, K),
+plus the
 provenance fields needed to attribute results (best seed, LL, restart
 SD bounds, cluster order, build wallclock, build timestamp).
 
@@ -59,6 +60,14 @@ class PanelCacheManifest(BaseModel):
     panel_id: str
     panel_version: str
     panel_bim_sha256: str
+    # SHA-256 of the supervised-label .pop file the cache was trained
+    # against. Optional for back-compat: caches built before this field
+    # existed have it as None, and verification skips the comparison
+    # rather than forcing a rebuild of every legacy cache (see
+    # verify_cache_matches_current_config). New builds always populate
+    # it, which makes the builder's idempotency check sensitive to a
+    # panel.pop edit that left every other hashed input unchanged.
+    panel_pop_sha256: str | None = None
     clusters_yaml_sha256: str
     k: int
     admixture_version: str

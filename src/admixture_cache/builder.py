@@ -190,8 +190,11 @@ def build_panel_cache(
     produced the matching panel_pop_file labeling each row.
 
     Idempotent: if cache_dir/manifest.json exists and SHAs match
-    (panel_bim_sha + clusters_yaml_sha + K + geo_filter_yaml_shas),
-    skip rebuild and return the existing manifest.
+    (panel_bim_sha + panel_pop_sha + clusters_yaml_sha + K +
+    geo_filter_yaml_shas), skip rebuild and return the existing manifest.
+    The panel_pop_sha comparison is skipped for legacy caches whose
+    manifest predates the field (panel_pop_sha256 is None), so an
+    upgrade never triggers a spurious rebuild on its own.
 
     On multimodality failure (max per-cluster restart_sd > sd_threshold),
     raises PanelCacheError after saving partial outputs for
@@ -261,6 +264,16 @@ def build_panel_cache(
             f"build_panel_cache: panel .bim missing at {panel_bim_path}",
         )
     panel_bim_sha = sha256_file(panel_bim_path)
+    # Hash the supervised-label .pop the same way (fast-fail on a missing
+    # file, mirroring the .bim guard above, so we don't reach restart
+    # staging before surfacing it). Recorded in the manifest and fed into
+    # the idempotency check below so an off-pipeline panel.pop edit that
+    # left every other hashed input untouched still forces a rebuild.
+    if not panel_pop_file.exists():
+        raise PanelCacheError(
+            f"build_panel_cache: panel .pop missing at {panel_pop_file}",
+        )
+    panel_pop_sha = sha256_file(panel_pop_file)
     clusters_yaml_sha = sha256_file(clusters_yaml)
     geo_shas = geo_filter_yaml_shas or {}
 
@@ -273,6 +286,7 @@ def build_panel_cache(
             expected_clusters_yaml_sha256=clusters_yaml_sha,
             expected_k=k,
             expected_geo_filter_yaml_shas=geo_shas if geo_shas else None,
+            expected_panel_pop_sha256=panel_pop_sha,
         )
         if matched:
             logger.info(
@@ -643,6 +657,7 @@ def build_panel_cache(
         panel_id=panel_id,
         panel_version=panel_version,
         panel_bim_sha256=panel_bim_sha,
+        panel_pop_sha256=panel_pop_sha,
         clusters_yaml_sha256=clusters_yaml_sha,
         k=k,
         admixture_version=admixture_version,

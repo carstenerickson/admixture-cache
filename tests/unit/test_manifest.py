@@ -285,7 +285,28 @@ class TestVerifyCacheMatchesCurrentConfig:
             expected_panel_pop_sha256="f" * 64,
         )
         assert matched is False
-        assert "panel.pop changed" in reason
+        assert "panel .pop changed" in reason
+
+    def test_clusters_yaml_reported_before_panel_pop_when_both_differ(
+        self, tmp_path: Path,
+    ) -> None:
+        """When a curator edits clusters_yaml, the downstream panel.pop is
+        regenerated, so BOTH shas diverge at once. The reported reason
+        must attribute the rebuild to the upstream root cause
+        (clusters_yaml), not the downstream panel.pop — i.e. clusters_yaml
+        is checked first. Pins the precedence so the diagnostic message
+        can't silently regress."""
+        self._write_manifest(tmp_path, panel_pop_sha256="e" * 64)
+        matched, reason = verify_cache_matches_current_config(
+            cache_dir=tmp_path,
+            expected_panel_bim_sha256="a" * 64,
+            expected_clusters_yaml_sha256="DIFFERENT" + "b" * 55,  # 64 chars
+            expected_k=4,
+            expected_panel_pop_sha256="f" * 64,  # also differs
+        )
+        assert matched is False
+        assert "clusters_yaml changed" in reason
+        assert "panel .pop" not in reason
 
     def test_match_when_panel_pop_sha_identical(self, tmp_path: Path) -> None:
         self._write_manifest(tmp_path, panel_pop_sha256="e" * 64)

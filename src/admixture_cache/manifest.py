@@ -3,9 +3,8 @@
 The manifest is the authoritative "this cache is valid" signal — it
 records the SHAs of every input that should determine cache validity
 (panel .bim, panel .pop, clusters YAML, optional geo-filter YAMLs, K),
-plus the
-provenance fields needed to attribute results (best seed, LL, restart
-SD bounds, cluster order, build wallclock, build timestamp).
+plus the provenance fields needed to attribute results (best seed, LL,
+restart SD bounds, cluster order, build wallclock, build timestamp).
 
 Written last by :func:`admixture_cache.builder.build_panel_cache`; if
 ``manifest.json`` is missing the cache is treated as in-progress or

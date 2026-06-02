@@ -90,15 +90,23 @@ def verify_cache_matches_current_config(
         )
     if manifest.panel_bim_sha256 != expected_panel_bim_sha256:
         return False, "panel .bim changed (panel version bump?)"
-    # panel.pop direct guard. Unlike the panel .bim / geo-filter checks
-    # this is LENIENT on None: a cache built before panel_pop_sha256
-    # existed records None, and we decline to force a (potentially
-    # many-hour) rebuild of every legacy cache for a defense-in-depth
-    # check it never opted into. We flag a mismatch only when BOTH the
-    # cache pinned a sha AND the caller supplied one — exactly the case
-    # this targets: a cache built WITH the field whose panel.pop was
-    # later edited off-pipeline while panel.bim / clusters / K / geo all
-    # stayed put. (The geo-filter check below is stricter because a
+    if manifest.clusters_yaml_sha256 != expected_clusters_yaml_sha256:
+        return False, "clusters_yaml changed (curator edit?)"
+    # panel.pop direct guard. Checked AFTER clusters_yaml deliberately:
+    # panel.pop is regenerated downstream of clusters_yaml, so a curator
+    # edit flips both shas at once — attributing that rebuild to the
+    # upstream "clusters_yaml changed" root cause is more actionable than
+    # "panel.pop changed". This check is therefore the distinguishing
+    # signal only for a pure off-pipeline panel.pop edit with
+    # clusters_yaml (and bim / K / geo) untouched — exactly what it
+    # targets.
+    #
+    # Unlike the panel .bim / clusters / geo-filter checks it is LENIENT
+    # on None: a cache built before panel_pop_sha256 existed records None,
+    # and we decline to force a (potentially many-hour) rebuild of every
+    # legacy cache for a defense-in-depth check it never opted into. We
+    # flag a mismatch only when BOTH the cache pinned a sha AND the caller
+    # supplied one. (The geo-filter check below is stricter because a
     # missing geo pin is itself a config signal — "built without that
     # filter" — whereas a missing panel.pop sha only means "predates the
     # field", not "no labels".)
@@ -107,9 +115,7 @@ def verify_cache_matches_current_config(
         and manifest.panel_pop_sha256 is not None
         and manifest.panel_pop_sha256 != expected_panel_pop_sha256
     ):
-        return False, "panel.pop changed (supervised labels edited?)"
-    if manifest.clusters_yaml_sha256 != expected_clusters_yaml_sha256:
-        return False, "clusters_yaml changed (curator edit?)"
+        return False, "panel .pop changed (supervised labels edited?)"
     # Geo-filter SHA comparison is symmetric: both directions must
     # agree. A caller that omits an expected dict while the cache has
     # pins (or vice versa) is a real mismatch — silently treating it

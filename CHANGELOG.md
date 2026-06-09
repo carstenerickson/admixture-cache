@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PanelCacheManifest.panel_pop_sha256` — a direct guard on the
+  supervised-label `.pop` file (admixture-cache #2).** The cache-validity
+  gate previously hashed `panel.bim`, `clusters_yaml`, the geo-filter
+  YAMLs, and `K`, but not `panel.pop`. Those inputs capture a
+  config-driven label change transitively (`panel.pop` is deterministic
+  from `clusters_yaml` + the panel sample set), so the only gap was a
+  *non-config* path that rewrites `panel.pop` while leaving every hashed
+  input untouched — e.g. a hand-edit between builds into the same
+  `cache_dir`. `build_panel_cache` now records `sha256(panel_pop_file)`
+  in the manifest and feeds it into its own idempotency check, so such an
+  edit forces a rebuild instead of being silently skipped.
+  - **Optional / back-compat.** The field defaults to `None`.
+    `verify_cache_matches_current_config` gained an
+    `expected_panel_pop_sha256` parameter and compares it **only when
+    both** the caller supplies one and the cache recorded one. A legacy
+    cache (`panel_pop_sha256 is None`) is never invalidated on this basis
+    alone, so upgrading the library does not trigger a spurious
+    (potentially many-hour) rebuild of existing caches. `schema_version`
+    stays `1`, matching how prior optional fields
+    (`pgen_samplebind_version`, `track`/`continent`) were added. The
+    geo-filter check stays strict on `None` because a missing geo pin is
+    itself a config signal; a missing `panel.pop` sha only means "this
+    cache predates the field".
+  - **Scope: a build-time guard.** `panel.pop` is a build *input*, not a
+    distributed cache artifact — projection never reads it and it is not
+    in the release tarball — so there is no consumer-side
+    `cache_dir/panel.pop` to hash at projection time. Defense-in-depth:
+    no uncovered `panel.pop` mutation path is currently known, and the
+    guard can only ever invalidate more aggressively, never produce a
+    false cache hit.
+  - `build_panel_cache` now fast-fails with a clear `panel .pop missing`
+    error when `panel_pop_file` is absent, mirroring the existing `.bim`
+    check, instead of surfacing a raw error later during restart staging.
+
 ## [1.4.2] - 2026-05-29
 
 ### Fixed

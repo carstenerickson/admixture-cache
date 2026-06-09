@@ -232,6 +232,148 @@ class TestBuildPanelCacheIdempotency:
         # Manifest has the correct SHA now
         assert result.panel_bim_sha256 == sha256_file(panel_bed.with_suffix(".bim"))
 
+    def test_rebuild_when_panel_pop_sha_changed(self, tmp_path: Path) -> None:
+        """Stale cache (panel.pop edited, every other hashed input
+        unchanged) → rebuild. This is the off-pipeline-label-edit case
+        the panel_pop_sha256 guard targets."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=5)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        # Correct bim + clusters shas but a WRONG panel_pop_sha256 —
+        # isolates panel.pop as the sole rebuild trigger.
+        manifest = PanelCacheManifest(
+            track="regional",
+            panel_id="p1", panel_version="v1",
+            panel_bim_sha256=sha256_file(panel_bed.with_suffix(".bim")),
+            panel_pop_sha256="z" * 64,  # not matching the real pop file
+            clusters_yaml_sha256=sha256_file(yaml),
+            k=2,
+            admixture_version="1.4.0",
+            seeds_used=[1],
+            best_seed=1, best_loglikelihood=-1.0, restart_sd_max=0.0,
+            cluster_order=["A", "B"],
+            build_wallclock_seconds=1.0,
+            build_timestamp=datetime.now(UTC),
+        )
+        (cache_dir / "manifest.json").write_text(manifest.model_dump_json())
+
+        runner = _FakeAdmixtureRunner(
+            k=2, n_samples=4, n_snps=5, seed_to_ll={1: -100.0},
+        )
+        result = build_panel_cache(
+            panel_bed=panel_bed,
+            panel_pop_file=pop,
+            clusters_yaml=yaml,
+            k=2,
+            cache_dir=cache_dir,
+            admixture_runner=runner,
+            track="regional",
+            panel_id="p1",
+            panel_version="v1",
+            admixture_version="1.4.0",
+            seeds=[1],
+            sd_threshold=1.0,
+        )
+        assert len(runner.calls) == 1  # rebuilt
+        assert result.panel_pop_sha256 == sha256_file(pop)
+
+    def test_skip_rebuild_when_pop_sha_matches(self, tmp_path: Path) -> None:
+        """Manifest pins the CORRECT panel.pop sha (plus all other
+        inputs) → no rebuild. Exercises the populated-sha match path,
+        not just the legacy-None leniency."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=5)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        manifest = PanelCacheManifest(
+            track="regional",
+            panel_id="p1", panel_version="v1",
+            panel_bim_sha256=sha256_file(panel_bed.with_suffix(".bim")),
+            panel_pop_sha256=sha256_file(pop),
+            clusters_yaml_sha256=sha256_file(yaml),
+            k=2,
+            admixture_version="1.4.0",
+            seeds_used=[1],
+            best_seed=1, best_loglikelihood=-1.0, restart_sd_max=0.0,
+            cluster_order=["A", "B"],
+            build_wallclock_seconds=1.0,
+            build_timestamp=datetime.now(UTC),
+        )
+        (cache_dir / "manifest.json").write_text(manifest.model_dump_json())
+
+        runner = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=5)
+        build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=cache_dir, admixture_runner=runner,
+            track="regional", panel_id="p1", panel_version="v1",
+            admixture_version="1.4.0", seeds=[1], sd_threshold=1.0,
+        )
+        assert runner.calls == []  # skipped
+
+    def test_legacy_manifest_without_pop_sha_still_skips(
+        self, tmp_path: Path,
+    ) -> None:
+        """A pre-field manifest (panel_pop_sha256 omitted → None) whose
+        other shas match must NOT rebuild on upgrade — the
+        leniency-on-None path keeps legacy caches valid."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=5)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        manifest = PanelCacheManifest(  # no panel_pop_sha256 → None
+            track="regional",
+            panel_id="p1", panel_version="v1",
+            panel_bim_sha256=sha256_file(panel_bed.with_suffix(".bim")),
+            clusters_yaml_sha256=sha256_file(yaml),
+            k=2,
+            admixture_version="1.4.0",
+            seeds_used=[1],
+            best_seed=1, best_loglikelihood=-1.0, restart_sd_max=0.0,
+            cluster_order=["A", "B"],
+            build_wallclock_seconds=1.0,
+            build_timestamp=datetime.now(UTC),
+        )
+        assert manifest.panel_pop_sha256 is None
+        (cache_dir / "manifest.json").write_text(manifest.model_dump_json())
+
+        runner = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=5)
+        build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=cache_dir, admixture_runner=runner,
+            track="regional", panel_id="p1", panel_version="v1",
+            admixture_version="1.4.0", seeds=[1], sd_threshold=1.0,
+        )
+        assert runner.calls == []  # legacy cache preserved, no rebuild
+
+    def test_first_build_records_panel_pop_sha(self, tmp_path: Path) -> None:
+        """A fresh build pins the sha of the supervised-label file it
+        trained against, both on the returned object and on disk."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        runner = _FakeAdmixtureRunner(
+            k=2, n_samples=4, n_snps=10, seed_to_ll={1: -100.0},
+        )
+        manifest = build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=cache_dir, admixture_runner=runner,
+            track="regional", panel_id="p1", panel_version="v1",
+            admixture_version="1.4.0", seeds=[1], sd_threshold=10.0,
+        )
+        assert manifest.panel_pop_sha256 == sha256_file(pop)
+        reloaded = PanelCacheManifest.model_validate_json(
+            (cache_dir / "manifest.json").read_text(),
+        )
+        assert reloaded.panel_pop_sha256 == sha256_file(pop)
+
     def test_first_build_runs_seeds_in_order(self, tmp_path: Path) -> None:
         """No existing cache → run all N seeds, pick best LL."""
         panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
@@ -348,6 +490,27 @@ class TestBuildPanelCacheIdempotency:
             build_panel_cache(
                 panel_bed=panel_bed,
                 panel_pop_file=pop,
+                clusters_yaml=yaml,
+                k=2,
+                cache_dir=tmp_path / "cache",
+                admixture_runner=_FakeAdmixtureRunner(k=2, n_samples=2, n_snps=5),
+                track="regional",
+                panel_id="p1",
+                panel_version="v1",
+                admixture_version="1.4.0",
+                seeds=[1],
+            )
+
+    def test_missing_panel_pop_raises(self, tmp_path: Path) -> None:
+        """A missing .pop is surfaced up front (mirroring the .bim
+        guard), not late during restart staging."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=2, n_snps=5)
+        missing_pop = tmp_path / "panel.pop"  # never written
+        yaml = _write_clusters_yaml(tmp_path)
+        with pytest.raises(PanelCacheError, match=r"panel \.pop missing"):
+            build_panel_cache(
+                panel_bed=panel_bed,
+                panel_pop_file=missing_pop,
                 clusters_yaml=yaml,
                 k=2,
                 cache_dir=tmp_path / "cache",

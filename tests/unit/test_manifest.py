@@ -145,6 +145,19 @@ class TestManifestSchema:
         )
         assert m2.pgen_samplebind_version == "0.4.0"
 
+    def test_panel_pop_sha256_optional(self) -> None:
+        """Defaults to None (back-compat with caches built before the
+        field existed); round-trips when populated."""
+        m = PanelCacheManifest(**_good_manifest_kwargs())  # type: ignore[arg-type]
+        assert m.panel_pop_sha256 is None
+        m2 = PanelCacheManifest(
+            **_good_manifest_kwargs(panel_pop_sha256="e" * 64),  # type: ignore[arg-type]
+        )
+        assert m2.panel_pop_sha256 == "e" * 64
+        # Survives a JSON round-trip alongside the other shas.
+        m3 = PanelCacheManifest.model_validate_json(m2.model_dump_json())
+        assert m3.panel_pop_sha256 == "e" * 64
+
 
 class TestVerifyCacheMatchesCurrentConfig:
     def _write_manifest(self, cache_dir: Path, **overrides: object) -> PanelCacheManifest:
@@ -259,6 +272,89 @@ class TestVerifyCacheMatchesCurrentConfig:
         assert matched is False
         assert "not pinned in cache" in reason
 
+    def test_mismatch_when_panel_pop_sha_differs(self, tmp_path: Path) -> None:
+        """Cache pinned a panel.pop sha; caller supplies a different one
+        (e.g. labels edited off-pipeline) → mismatch. This is the direct
+        label guard the field exists for."""
+        self._write_manifest(tmp_path, panel_pop_sha256="e" * 64)
+        matched, reason = verify_cache_matches_current_config(
+            cache_dir=tmp_path,
+            expected_panel_bim_sha256="a" * 64,
+            expected_clusters_yaml_sha256="b" * 64,
+            expected_k=4,
+            expected_panel_pop_sha256="f" * 64,
+        )
+        assert matched is False
+        assert "panel .pop changed" in reason
+
+    def test_clusters_yaml_reported_before_panel_pop_when_both_differ(
+        self, tmp_path: Path,
+    ) -> None:
+        """When a curator edits clusters_yaml, the downstream panel.pop is
+        regenerated, so BOTH shas diverge at once. The reported reason
+        must attribute the rebuild to the upstream root cause
+        (clusters_yaml), not the downstream panel.pop — i.e. clusters_yaml
+        is checked first. Pins the precedence so the diagnostic message
+        can't silently regress."""
+        self._write_manifest(tmp_path, panel_pop_sha256="e" * 64)
+        matched, reason = verify_cache_matches_current_config(
+            cache_dir=tmp_path,
+            expected_panel_bim_sha256="a" * 64,
+            expected_clusters_yaml_sha256="DIFFERENT" + "b" * 55,  # 64 chars
+            expected_k=4,
+            expected_panel_pop_sha256="f" * 64,  # also differs
+        )
+        assert matched is False
+        assert "clusters_yaml changed" in reason
+        assert "panel .pop" not in reason
+
+    def test_match_when_panel_pop_sha_identical(self, tmp_path: Path) -> None:
+        self._write_manifest(tmp_path, panel_pop_sha256="e" * 64)
+        matched, reason = verify_cache_matches_current_config(
+            cache_dir=tmp_path,
+            expected_panel_bim_sha256="a" * 64,
+            expected_clusters_yaml_sha256="b" * 64,
+            expected_k=4,
+            expected_panel_pop_sha256="e" * 64,
+        )
+        assert matched is True
+        assert reason == "match"
+
+    def test_legacy_cache_without_pop_sha_not_invalidated(
+        self, tmp_path: Path,
+    ) -> None:
+        """A cache built before panel_pop_sha256 existed records None.
+        Even when the caller supplies a sha, the cache must NOT be
+        invalidated on that basis alone — forcing a (potentially
+        many-hour) rebuild of every legacy cache on upgrade is the wrong
+        tradeoff for a defense-in-depth check. Leniency on None is the
+        whole point of the field being optional."""
+        self._write_manifest(tmp_path)  # no panel_pop_sha256 → None
+        matched, reason = verify_cache_matches_current_config(
+            cache_dir=tmp_path,
+            expected_panel_bim_sha256="a" * 64,
+            expected_clusters_yaml_sha256="b" * 64,
+            expected_k=4,
+            expected_panel_pop_sha256="f" * 64,
+        )
+        assert matched is True
+        assert reason == "match"
+
+    def test_caller_omitting_pop_sha_skips_check(self, tmp_path: Path) -> None:
+        """Symmetric opt-out: a cache that pinned a sha is still reusable
+        by a caller that doesn't supply one (default None). The guard is
+        opt-in from both directions."""
+        self._write_manifest(tmp_path, panel_pop_sha256="e" * 64)
+        matched, reason = verify_cache_matches_current_config(
+            cache_dir=tmp_path,
+            expected_panel_bim_sha256="a" * 64,
+            expected_clusters_yaml_sha256="b" * 64,
+            expected_k=4,
+            # expected_panel_pop_sha256 omitted → None
+        )
+        assert matched is True
+        assert reason == "match"
+
     def test_missing_manifest_reported(self, tmp_path: Path) -> None:
         matched, reason = verify_cache_matches_current_config(
             cache_dir=tmp_path,
@@ -372,6 +468,14 @@ class TestLegacyManifestReparse:
         )
         assert m.track == "ancestral_cluster"
         assert m.continent == "Europe"
+
+    def test_legacy_manifest_without_panel_pop_sha_loads_as_none(self) -> None:
+        """The pre-field manifest JSON (no panel_pop_sha256 key) must
+        load — `extra='forbid'` rejects unknown keys, not absent
+        optional ones — and surface the field as None so the verify
+        leniency path engages."""
+        m = PanelCacheManifest.model_validate_json(self._legacy_json())
+        assert m.panel_pop_sha256 is None
 
     def test_legacy_zulu_z_suffix_iso_reparses(self) -> None:
         """Some ISO writers use `Z` instead of `+00:00` for UTC.

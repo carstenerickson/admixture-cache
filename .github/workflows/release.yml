@@ -17,12 +17,6 @@ on:
 permissions:
   contents: read
 
-# Opt JS-based actions in to Node.js 24 ahead of GitHub's June 2026 forced
-# migration. Affects upload-artifact@v4 / download-artifact@v4 (still on
-# Node 20 as of v4); checkout@v5 / setup-python@v6 are already on Node 24.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   build:
     name: Build sdist + wheel
@@ -48,7 +42,7 @@ jobs:
         run: twine check --strict dist/*
 
       - name: Upload distribution artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -73,7 +67,7 @@ jobs:
           cache: pip
 
       - name: Download distribution artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
@@ -117,7 +111,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distribution artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/

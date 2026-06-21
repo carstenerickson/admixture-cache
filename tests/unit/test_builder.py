@@ -1190,9 +1190,9 @@ class TestLdPrunePanel:
         )
         args = runner.calls[0]
         idx = args.index("--indep-pairwise")
-        assert args[idx + 1] == "50"   # window_size default (variants)
-        assert args[idx + 2] == "5"    # step_size default
-        assert args[idx + 3] == "0.5"  # r2_threshold default
+        assert args[idx + 1] == "200"  # window_size default (variants)
+        assert args[idx + 2] == "25"   # step_size default
+        assert args[idx + 3] == "0.4"  # r2_threshold default
 
     def test_custom_parameters_passed_through(self, tmp_path: Path) -> None:
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)

@@ -921,9 +921,9 @@ def ld_prune_panel(
     panel_bed: Path,
     output_prefix: Path,
     plink2_runner: ToolRunner,
-    window_size: int = 50,
-    step_size: int = 5,
-    r2_threshold: float = 0.5,
+    window_size: int = 200,
+    step_size: int = 25,
+    r2_threshold: float = 0.4,
     log_dir: Path,
     timeout_seconds: int = 3600,
     # Deprecated misnomer for `window_size`. The value was always a
@@ -933,12 +933,26 @@ def ld_prune_panel(
 ) -> Path:
     """Apply LD-pruning to a panel BED via plink2 --indep-pairwise.
 
-    Per Alexander et al. 2009 and the HLD Exp 2 measurements, LD-pruning
-    is the dominant cost-cutter for supervised-ADMIXTURE training:
-    LD-pruned SNPs are statistically more independent → ADMIXTURE
-    converges in fewer iterations. Combined with the reduced SNP count
-    per iter, a 50/5/0.5 prune typically yields 30-50% of variants and
-    gives 3-5× total speedup.
+    LD-pruning serves correctness first and speed second: ADMIXTURE
+    assumes approximately unlinked markers, so correlated SNP blocks can
+    inflate spurious structure, and LD-pruned SNPs also let ADMIXTURE
+    converge in fewer iterations. This matters extra here because the
+    resulting allele-frequency matrix P is cached and reused on every
+    projection, so any LD-driven bias is frozen in.
+
+    The defaults (200-variant window, 25-variant step, r²<0.4) match the
+    dominant recipe in the human ancient-DNA ADMIXTURE literature: a
+    survey of methods sections (AADR 1240K and Human Origins panels)
+    finds variant-count windows used over kb windows roughly 17:1, with
+    200/25/0.4 by far the most common single recipe (the Reich-lab /
+    Human Origins house style, e.g. Cardial-LBK 2015
+    doi:10.1093/molbev/msv181; Late Neolithic Switzerland 2020
+    doi:10.1038/s41467-020-15560-x; Shimao 2025
+    doi:10.1038/s41586-025-09799-x). The ADMIXTURE-manual recipe
+    (50/10/0.1) is the main alternative. On a dense ~1.1M-SNP 1240K panel
+    this retains roughly 450-600K SNPs. NOTE: a bare plink2
+    ``--indep-pairwise`` window is a variant count, not kb (see
+    ``window_size`` below).
 
     Two-step plink2 invocation:
 
@@ -956,15 +970,15 @@ def ld_prune_panel(
             at ``<output_prefix>.bed`` (with sibling .bim/.fam).
         plink2_runner: ToolRunner for plink2 invocations.
         window_size: ``--indep-pairwise`` window size in VARIANTS
-            (default 50). A bare plink2 ``--indep-pairwise`` window is a
-            variant count, not kb: the conventional "50 5 0.5" prune is a
-            50-variant window with a 5-variant step. A kb window would
-            need an explicit "kb" suffix AND a step of 1 (plink2 rejects a
-            kb window with any other step), so this value has never been
-            kb. The old ``window_kb`` keyword (a misnomer) is still
-            accepted as a deprecated alias for this parameter.
-        step_size: --indep-pairwise step size in variants (default 5).
-        r2_threshold: --indep-pairwise r² threshold (default 0.5).
+            (default 200). A bare plink2 ``--indep-pairwise`` window is a
+            variant count, not kb: e.g. "200 25 0.4" is a 200-variant
+            window with a 25-variant step. A kb window would need an
+            explicit "kb" suffix AND a step of 1 (plink2 rejects a kb
+            window with any other step), so this value has never been kb.
+            The old ``window_kb`` keyword (a misnomer) is still accepted
+            as a deprecated alias for this parameter.
+        step_size: --indep-pairwise step size in variants (default 25).
+        r2_threshold: --indep-pairwise r² threshold (default 0.4).
         log_dir: Where to write plink2 logs.
         timeout_seconds: Per-plink2-call timeout (default 1hr).
 

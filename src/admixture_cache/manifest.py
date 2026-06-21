@@ -32,9 +32,13 @@ caches using those exact labels still load unchanged.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class PanelCacheManifest(BaseModel):
@@ -56,7 +60,31 @@ class PanelCacheManifest(BaseModel):
     # the manifest is machine-written, so rejecting unknown keys bought
     # little. Backward compatibility (new code reading old manifests) is
     # unaffected: missing optional fields fall back to their defaults.
+    # Unknown keys are not dropped *silently*: _warn_on_unknown_fields logs
+    # them so a future field or a typo is at least visible.
     model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_unknown_fields(cls, data: Any) -> Any:
+        """Surface unknown manifest keys as a warning before they are
+        dropped. ``extra="ignore"`` buys forward compatibility (a manifest
+        written by a newer library still loads) but would otherwise discard
+        unrecognized keys with no signal at all — so a typo'd or stale field
+        name would silently vanish. Logging it keeps the load non-fatal
+        while making an unexpected key (a genuine future field OR a mistake)
+        visible. Absent optional fields are not "unknown" and never warn."""
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(cls.model_fields))
+            if unknown:
+                logger.warning(
+                    "PanelCacheManifest: ignoring %d unrecognized manifest "
+                    "field(s) %s — written by a newer admixture-cache, or a "
+                    "typo. Known fields are still validated; unknown keys are "
+                    "dropped for forward compatibility (extra='ignore').",
+                    len(unknown), unknown,
+                )
+        return data
 
     schema_version: int = 1
     # Free-text provenance label (e.g. "regional", "continental_admixture",

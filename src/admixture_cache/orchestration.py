@@ -37,12 +37,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_exclude_strand_ambiguous(
+    explicit: bool | None, manifest_decision: bool | None,
+) -> bool:
+    """Resolve the projection-time strand-ambiguous policy (D11).
+
+    ``explicit`` is the caller's override; ``None`` (the default) decides
+    from the cache's recorded build state. Projection defaults to the
+    *protective* choice (exclude), because whether a target shares the
+    panel's strand convention is a property of the (panel, target) pair
+    decided here at projection time — not something the builder can assert
+    for unknown downstream targets (and this library distributes caches
+    across parties). The manifest's ``strand_ambiguous_excluded`` is used
+    only to skip needless work, never to weaken the default:
+
+    - ``True``  — the build certified the panel free of A/T,C/G SNPs, so
+      there is nothing to exclude. Return False to skip the per-projection
+      ``panel.bim`` scan (a no-op that would find nothing anyway).
+    - ``False`` — the operator kept ambiguous SNPs at build time, so the
+      panel still contains them; exclude them here protectively.
+    - ``None``  — legacy cache that may still contain them; exclude
+      protectively (scan + ``--exclude``).
+
+    Keeping ambiguous SNPs at projection is a per-call opt-in via an
+    explicit ``False`` (CLI ``--keep-strand-ambiguous``); it is
+    deliberately NOT inherited from how the cache was built. An explicit
+    ``True``/``False`` always overrides.
+    """
+    if explicit is not None:
+        return explicit
+    return manifest_decision is not True
+
+
 def project_target(
     *, target_bed: Path,
     cache_dir: Path,
     plink2_runner: ToolRunner,
     work_dir: Path,
-    exclude_strand_ambiguous: bool = True,
+    exclude_strand_ambiguous: bool | None = None,
 ) -> ProjectionResult:
     """End-to-end per-target projection:
     1. Validate cache exists + load manifest
@@ -52,14 +84,17 @@ def project_target(
     5. Run NumPy SLSQP projection
     6. Return ProjectionResult with Q vector + metadata
 
-    ``exclude_strand_ambiguous`` (default True) drops strand-ambiguous
-    (A/T, C/G) panel SNPs from the alignment, which cannot be safely
+    ``exclude_strand_ambiguous`` controls dropping strand-ambiguous
+    (A/T, C/G) panel SNPs from the alignment — they cannot be safely
     REF/ALT-harmonized and are silently strand-inverted for an
-    opposite-strand target (see SCIENCE.md D11). It is a no-op against a
-    cache built with build_panel_cache's default guard (which contains
-    none) and protects legacy caches that still contain them. Pass False
-    only when target and panel are guaranteed to share a strand
-    convention.
+    opposite-strand target (see SCIENCE.md D11). The default ``None``
+    excludes them protectively, using the manifest only to skip needless
+    work: a build-certified-clean cache skips the per-projection panel.bim
+    scan, while a cache that may still contain them (operator kept them at
+    build, or a legacy pre-D11 cache) has them excluded. Keeping them is a
+    per-call opt-in via ``False`` (CLI ``--keep-strand-ambiguous``), only
+    safe when this target shares the panel's strand convention; it is not
+    inherited from the build. Pass ``True`` to force exclusion.
 
     Total wallclock: ~2 sec end-to-end on a typical 850K-SNP panel
     (excluding the 28-sec pandas .raw load that currently dominates;
@@ -101,6 +136,14 @@ def project_target(
             f"project_target: cache missing panel.bim at {panel_bim}",
         )
 
+    # Resolve the strand-ambiguous policy from the caller's override and
+    # the build's recorded decision (default None -> follow the manifest;
+    # see _resolve_exclude_strand_ambiguous). A certified-clean cache
+    # resolves to False, skipping the per-projection panel.bim scan.
+    effective_exclude = _resolve_exclude_strand_ambiguous(
+        exclude_strand_ambiguous, manifest.strand_ambiguous_excluded,
+    )
+
     # Step 2: align target to panel variant set + axes
     aligned_prefix = call_dir / "target_aligned"
     aligned_bed = align_target_to_panel_bim(
@@ -109,7 +152,7 @@ def project_target(
         output_prefix=aligned_prefix,
         plink2_runner=plink2_runner,
         log_dir=call_dir / "logs",
-        exclude_strand_ambiguous=exclude_strand_ambiguous,
+        exclude_strand_ambiguous=effective_exclude,
     )
 
     # Step 3: extract dosage as NumPy array

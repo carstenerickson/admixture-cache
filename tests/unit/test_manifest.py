@@ -117,6 +117,29 @@ class TestManifestSchema:
         assert m.panel_id == base.panel_id
         assert m.k == base.k
 
+    def test_unknown_field_is_warned_not_silent(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Forward-compat must not be *silent*: an unrecognized key (a
+        future field or a typo) still loads but emits a warning naming it,
+        so a stale/mistyped field cannot vanish without a trace."""
+        base = PanelCacheManifest(**_good_manifest_kwargs())  # type: ignore[arg-type]
+        blob = json.loads(base.model_dump_json())
+        blob["pgen_samplebind_versionn"] = "typo"  # misspelled real field
+        with caplog.at_level("WARNING", logger="admixture_cache.manifest"):
+            PanelCacheManifest.model_validate_json(json.dumps(blob))
+        assert "pgen_samplebind_versionn" in caplog.text
+        assert "unrecognized manifest" in caplog.text
+
+    def test_known_fields_do_not_warn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A manifest with only known keys (and absent optional ones)
+        must not warn — missing optional fields are not 'unknown'."""
+        with caplog.at_level("WARNING", logger="admixture_cache.manifest"):
+            PanelCacheManifest(**_good_manifest_kwargs())  # type: ignore[arg-type]
+        assert "unrecognized manifest" not in caplog.text
+
     def test_required_fields_enforced(self) -> None:
         kwargs = _good_manifest_kwargs()
         kwargs.pop("panel_id")

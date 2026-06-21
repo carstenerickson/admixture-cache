@@ -24,10 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (CLI `--keep-strand-ambiguous`) to keep them.
   - **Projection-time guard.** `align_target_to_panel_bim` /
     `project_target` now drop strand-ambiguous panel SNPs from the
-    alignment via `plink2 --exclude` by default, protecting caches built
-    before this release (which may still contain them) with no rebuild.
-    No-op for caches built with the new build guard. CLI
-    `--keep-strand-ambiguous` opts out.
+    alignment via `plink2 --exclude`, protecting caches built before this
+    release (which may still contain them) with no rebuild. By default
+    (`exclude_strand_ambiguous=None`) `project_target` excludes them
+    protectively, using the manifest only to skip needless work: a
+    build-certified-clean cache (`strand_ambiguous_excluded=True`) skips
+    the per-projection `panel.bim` scan, while a cache that may still
+    contain them (operator kept them at build, or a legacy pre-D11 cache)
+    has them excluded. Whether a target shares the panel's strand
+    convention is a per-(panel, target) property decided at projection,
+    not bakeable at build, so keeping ambiguous SNPs is a per-projection
+    opt-in (CLI `--keep-strand-ambiguous`, or `exclude_strand_ambiguous=
+    False`), deliberately not inherited from the build. Pass `True` to
+    force exclusion.
   - **Manifest.** New optional `strand_ambiguous_excluded: bool | None`
     field records the build's decision (`True` certified clean, `False`
     opted to keep, `None` legacy). `schema_version` stays `1`; the field
@@ -50,7 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integrity is still covered by the SHA-256 check; the manifest is
   machine-written, so rejecting unknown keys bought little. Backward
   compatibility (new code reading old manifests) is unchanged: absent
-  optional fields fall back to their defaults.
+  optional fields fall back to their defaults. Unknown keys are not
+  dropped *silently*: an unrecognized field (a newer library's field, or a
+  typo) is logged as a warning naming it, so a stale/mistyped key cannot
+  vanish without a trace.
 
 ## [1.5.0] - 2026-06-09
 

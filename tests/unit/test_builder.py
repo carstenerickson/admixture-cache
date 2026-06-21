@@ -1190,7 +1190,7 @@ class TestLdPrunePanel:
         )
         args = runner.calls[0]
         idx = args.index("--indep-pairwise")
-        assert args[idx + 1] == "50"   # window_kb default
+        assert args[idx + 1] == "50"   # window_size default (variants)
         assert args[idx + 2] == "5"    # step_size default
         assert args[idx + 3] == "0.5"  # r2_threshold default
 
@@ -1202,13 +1202,33 @@ class TestLdPrunePanel:
             output_prefix=tmp_path / "pruned",
             plink2_runner=runner,
             log_dir=tmp_path / "logs",
-            window_kb=200, step_size=10, r2_threshold=0.2,
+            window_size=200, step_size=10, r2_threshold=0.2,
         )
         args = runner.calls[0]
         idx = args.index("--indep-pairwise")
         assert args[idx + 1] == "200"
         assert args[idx + 2] == "10"
         assert args[idx + 3] == "0.2"
+
+    def test_deprecated_window_kb_alias_maps_to_window_size(
+        self, tmp_path: Path,
+    ) -> None:
+        """The old `window_kb` keyword (a misnomer: the value is a variant
+        count, not kb) still works, mapping onto window_size with a
+        DeprecationWarning, so existing callers do not break."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)
+        runner = _FakePlink2Runner()
+        with pytest.warns(DeprecationWarning, match="window_kb"):
+            ld_prune_panel(
+                panel_bed=panel_bed,
+                output_prefix=tmp_path / "pruned",
+                plink2_runner=runner,
+                log_dir=tmp_path / "logs",
+                window_kb=200,
+            )
+        args = runner.calls[0]
+        idx = args.index("--indep-pairwise")
+        assert args[idx + 1] == "200"  # honored, identical to window_size=200
 
     def test_missing_prune_in_raises(self, tmp_path: Path) -> None:
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)

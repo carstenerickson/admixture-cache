@@ -921,11 +921,15 @@ def ld_prune_panel(
     panel_bed: Path,
     output_prefix: Path,
     plink2_runner: ToolRunner,
-    window_kb: int = 50,
+    window_size: int = 50,
     step_size: int = 5,
     r2_threshold: float = 0.5,
     log_dir: Path,
     timeout_seconds: int = 3600,
+    # Deprecated misnomer for `window_size`. The value was always a
+    # plink2 --indep-pairwise window in VARIANTS, never kb; honored with
+    # a DeprecationWarning when passed so existing callers do not break.
+    window_kb: int | None = None,
 ) -> Path:
     """Apply LD-pruning to a panel BED via plink2 --indep-pairwise.
 
@@ -951,7 +955,14 @@ def ld_prune_panel(
         output_prefix: Prefix for plink2 outputs. The pruned BED lands
             at ``<output_prefix>.bed`` (with sibling .bim/.fam).
         plink2_runner: ToolRunner for plink2 invocations.
-        window_kb: --indep-pairwise window size in kb (default 50).
+        window_size: ``--indep-pairwise`` window size in VARIANTS
+            (default 50). A bare plink2 ``--indep-pairwise`` window is a
+            variant count, not kb: the conventional "50 5 0.5" prune is a
+            50-variant window with a 5-variant step. A kb window would
+            need an explicit "kb" suffix AND a step of 1 (plink2 rejects a
+            kb window with any other step), so this value has never been
+            kb. The old ``window_kb`` keyword (a misnomer) is still
+            accepted as a deprecated alias for this parameter.
         step_size: --indep-pairwise step size in variants (default 5).
         r2_threshold: --indep-pairwise r² threshold (default 0.5).
         log_dir: Where to write plink2 logs.
@@ -966,6 +977,21 @@ def ld_prune_panel(
     stays valid unless the sample set also changed; the caller can
     just copy panel.pop next to the pruned output.)
     """
+    # Back-compat: `window_kb` was a misnomer (the value is a variant
+    # count, not kb). Map it onto `window_size` with a deprecation warning.
+    if window_kb is not None:
+        import warnings
+
+        warnings.warn(
+            "ld_prune_panel(window_kb=...) is a misnomer: the value is a "
+            "plink2 --indep-pairwise window in VARIANTS, not kb. Pass "
+            "window_size= instead; window_kb will be removed in a future "
+            "release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        window_size = window_kb
+
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -982,7 +1008,7 @@ def ld_prune_panel(
         args=[
             "--bfile", str(panel_prefix),
             "--indep-pairwise",
-            str(window_kb), str(step_size), str(r2_threshold),
+            str(window_size), str(step_size), str(r2_threshold),
             "--out", str(output_prefix),
         ],
         cwd=output_prefix.parent,

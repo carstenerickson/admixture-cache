@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ld_prune_panel` parameter `window_kb` was a misnomer (SCIENCE.md
+  D7).** The value is passed straight to `plink2 --indep-pairwise` as a
+  bare integer, which plink2 interprets as a window in VARIANTS, not kb
+  (a kb window needs an explicit "kb" suffix AND a step of 1; plink2
+  rejects a kb window with any other step, so the documented "kb"
+  reading was never even valid alongside the default step of 5). The
+  conventional "50 5 0.5" prune the helper runs is a 50-variant window
+  with a 5-variant step, which is the intended and standard behavior.
+  Confirmed against plink2 v2.0.0. This is a naming and documentation
+  fix only: **the emitted plink2 command and the pruning result are
+  unchanged.** The parameter is renamed `window_size`, the docstring and
+  help now say "variants", and the old `window_kb` keyword is still
+  accepted as a deprecated alias (with a `DeprecationWarning`) so
+  existing callers do not break.
+
 ## [1.5.0] - 2026-06-09
 
 ### Added

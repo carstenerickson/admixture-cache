@@ -17,7 +17,9 @@ from admixture_cache import (
     PanelCacheManifest,
     build_panel_cache,
     ld_prune_panel,
+    strip_strand_ambiguous_snps,
 )
+from admixture_cache._paths import append_suffix
 from admixture_cache.builder import (
     _auto_max_parallel_restarts,
     _parse_admixture_loglikelihood,
@@ -1246,6 +1248,185 @@ class TestLdPrunePanel:
         )
         assert result == out_prefix.with_suffix(".bed")
         assert result.exists()
+
+
+def _write_panel_triplet_with_alleles(
+    tmp_path: Path, allele_rows: list[tuple[str, str]], n_samples: int = 4,
+) -> Path:
+    """Like _write_panel_triplet but with caller-chosen (a1, a2) alleles
+    per SNP, so a panel can include strand-ambiguous (A/T, C/G) SNPs."""
+    bed = tmp_path / "panel.bed"
+    bed.write_bytes(b"\x6c\x1b\x01")
+    bim = tmp_path / "panel.bim"
+    bim.write_text(
+        "\n".join(
+            f"1\trs{i}\t0\t{i+1000}\t{a1}\t{a2}"
+            for i, (a1, a2) in enumerate(allele_rows)
+        ) + "\n"
+    )
+    fam = tmp_path / "panel.fam"
+    fam.write_text(
+        "\n".join(f"F{i}\tI{i}\t0\t0\t1\t-9" for i in range(n_samples)) + "\n"
+    )
+    return bed
+
+
+class TestBuildStrandAmbiguousGuard:
+    """D11: build refuses a panel containing strand-ambiguous (A/T, C/G)
+    SNPs by default and records the decision in the manifest."""
+
+    def test_build_refuses_ambiguous_panel_by_default(
+        self, tmp_path: Path,
+    ) -> None:
+        # rs0 A/G ok, rs1 A/T ambiguous, rs2 C/G ambiguous, rs3 A/G ok
+        panel_bed = _write_panel_triplet_with_alleles(
+            tmp_path, [("A", "G"), ("A", "T"), ("C", "G"), ("A", "G")],
+        )
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        runner = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=4)
+        with pytest.raises(PanelCacheError, match="strand-ambiguous"):
+            build_panel_cache(
+                panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+                k=2, cache_dir=tmp_path / "cache", admixture_runner=runner,
+                panel_id="p", panel_version="v", admixture_version="1.4.0",
+                seeds=[1], sd_threshold=10.0,
+            )
+        # Guard fires BEFORE any training: runner is never invoked, no
+        # manifest is written.
+        assert runner.calls == []
+        assert not (tmp_path / "cache" / "manifest.json").exists()
+
+    def test_build_allows_ambiguous_when_disabled(self, tmp_path: Path) -> None:
+        panel_bed = _write_panel_triplet_with_alleles(
+            tmp_path, [("A", "G"), ("A", "T"), ("C", "G"), ("A", "G")],
+        )
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        runner = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=4)
+        manifest = build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=tmp_path / "cache", admixture_runner=runner,
+            panel_id="p", panel_version="v", admixture_version="1.4.0",
+            seeds=[1], sd_threshold=10.0,
+            exclude_strand_ambiguous=False,
+        )
+        assert manifest.strand_ambiguous_excluded is False
+
+    def test_idempotent_rerun_of_kept_ambiguous_cache_is_noop(
+        self, tmp_path: Path,
+    ) -> None:
+        """A cache built with exclude_strand_ambiguous=False (ambiguous
+        SNPs retained) must still no-op on an idempotent re-run with the
+        default (True). The guard runs AFTER the idempotency short-circuit,
+        so a SHA-matching cache returns the existing manifest instead of
+        hard-failing on the still-ambiguous panel."""
+        panel_bed = _write_panel_triplet_with_alleles(
+            tmp_path, [("A", "G"), ("A", "T"), ("C", "G"), ("A", "G")],
+        )
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        # First build keeps ambiguous SNPs (would otherwise be refused).
+        build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=cache_dir,
+            admixture_runner=_FakeAdmixtureRunner(k=2, n_samples=4, n_snps=4),
+            panel_id="p", panel_version="v", admixture_version="1.4.0",
+            seeds=[1], sd_threshold=10.0, exclude_strand_ambiguous=False,
+        )
+        # Re-run with the DEFAULT (exclude=True) against the same valid
+        # cache + unchanged ambiguous panel: must be a no-op, not a raise.
+        runner2 = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=4)
+        manifest = build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=cache_dir, admixture_runner=runner2,
+            panel_id="p", panel_version="v", admixture_version="1.4.0",
+            seeds=[1], sd_threshold=10.0,
+        )
+        assert runner2.calls == []  # idempotent short-circuit, no training
+        assert manifest.strand_ambiguous_excluded is False  # original build's
+
+    def test_build_records_excluded_true_on_clean_panel(
+        self, tmp_path: Path,
+    ) -> None:
+        # _write_panel_triplet writes A/G (non-ambiguous) SNPs.
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=5)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        runner = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=5)
+        manifest = build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=tmp_path / "cache", admixture_runner=runner,
+            panel_id="p", panel_version="v", admixture_version="1.4.0",
+            seeds=[1], sd_threshold=10.0,
+        )
+        assert manifest.strand_ambiguous_excluded is True
+
+
+class TestStripStrandAmbiguousSnps:
+    """D11 pre-build helper: drop A/T, C/G SNPs from a panel via plink2."""
+
+    class _Runner:
+        """Emits a full BED triplet on --make-bed (strip uses --make-bed
+        with or without --exclude, never --extract)."""
+
+        def __init__(self, retained: tuple[str, ...] = ("rs0", "rs3")) -> None:
+            self.calls: list[list[str]] = []
+            self.retained = retained
+
+        def run(
+            self, *, args: list[str], cwd: Path, log_dir: Path,
+            timeout_seconds: int = 3600, log_name: str | None = None,
+        ) -> object:
+            self.calls.append(list(args))
+            out_prefix = Path(args[args.index("--out") + 1])
+            append_suffix(out_prefix, ".bed").write_bytes(b"\x6c\x1b\x01")
+            append_suffix(out_prefix, ".bim").write_text(
+                "\n".join(
+                    f"1\t{v}\t0\t{i+1000}\tA\tG"
+                    for i, v in enumerate(self.retained)
+                ) + "\n"
+            )
+            append_suffix(out_prefix, ".fam").write_text("F\tI\t0\t0\t0\t-9\n")
+            return None
+
+    def test_excludes_ambiguous_snps(self, tmp_path: Path) -> None:
+        panel_bed = _write_panel_triplet_with_alleles(
+            tmp_path, [("A", "G"), ("A", "T"), ("C", "G"), ("A", "C")],
+        )
+        runner = self._Runner()
+        out = tmp_path / "clean"
+        result = strip_strand_ambiguous_snps(
+            panel_bed=panel_bed, output_prefix=out,
+            plink2_runner=runner, log_dir=tmp_path / "logs",
+        )
+        args = runner.calls[0]
+        assert "--exclude" in args
+        exclude_path = Path(args[args.index("--exclude") + 1])
+        assert sorted(exclude_path.read_text().split()) == ["rs1", "rs2"]
+        assert result == append_suffix(out, ".bed")
+        assert result.exists()
+
+    def test_copies_through_clean_panel(self, tmp_path: Path) -> None:
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=4)  # A/G
+        runner = self._Runner()
+        strip_strand_ambiguous_snps(
+            panel_bed=panel_bed, output_prefix=tmp_path / "clean",
+            plink2_runner=runner, log_dir=tmp_path / "logs",
+        )
+        args = runner.calls[0]
+        assert "--exclude" not in args
+        assert "--make-bed" in args
+
+    def test_missing_panel_bim_raises(self, tmp_path: Path) -> None:
+        bed = tmp_path / "panel.bed"
+        bed.write_bytes(b"\x6c\x1b\x01")  # no sibling .bim
+        with pytest.raises(PanelCacheError, match=r"\.bim missing"):
+            strip_strand_ambiguous_snps(
+                panel_bed=bed, output_prefix=tmp_path / "clean",
+                plink2_runner=self._Runner(), log_dir=tmp_path / "logs",
+            )
 
 
 class TestParallelRestartCancellation:

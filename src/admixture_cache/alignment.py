@@ -45,6 +45,46 @@ _PGEN_SIBLINGS = PGEN_SIBLINGS
 _append_suffix = append_suffix
 
 
+# Strand-ambiguous SNP detection. A SNP whose two alleles are
+# complementary (A/T or C/G) has a base-pair representation that is
+# invariant under a strand flip, so REF/ALT harmonization by variant ID
+# cannot tell whether the target is on the same strand as the panel:
+# ``plink2 --alt1-allele`` "succeeds" by matching the allele LETTER while
+# silently leaving an opposite-strand target's dosage inverted
+# (homozygotes flip 0<->2; heterozygotes are unaffected). Non-ambiguous
+# SNPs are safe because their flipped letters do not match, so the
+# forcing is skipped. The only robust fix is to drop the ambiguous SNPs;
+# see SCIENCE.md D11.
+_STRAND_AMBIGUOUS_PAIRS = frozenset({
+    frozenset({"A", "T"}),
+    frozenset({"C", "G"}),
+})
+
+
+def is_strand_ambiguous(allele1: str, allele2: str) -> bool:
+    """Return True if a SNP's two alleles are strand-complementary
+    (A/T or C/G), so the allele set is invariant under a strand flip and
+    REF/ALT harmonization by ID cannot detect an opposite-strand target.
+    Case-insensitive; non-SNP / multi-character alleles return False."""
+    return (
+        frozenset({allele1.upper(), allele2.upper()})
+        in _STRAND_AMBIGUOUS_PAIRS
+    )
+
+
+def strand_ambiguous_variant_ids(bim_path: Path) -> list[str]:
+    """Return the variant IDs (column 2) of every strand-ambiguous
+    (A/T, C/G) SNP in a PLINK ``.bim`` (alleles in columns 5 and 6),
+    in file order."""
+    ids: list[str] = []
+    with bim_path.open() as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) >= 6 and is_strand_ambiguous(parts[4], parts[5]):
+                ids.append(parts[1])
+    return ids
+
+
 def _detect_target_format(target_path: Path) -> tuple[str, Path]:
     """Determine the plink2 input flag and stem path from a target path.
 
@@ -116,6 +156,7 @@ def align_target_to_panel_bim(
     output_prefix: Path, plink2_runner: ToolRunner,
     log_dir: Path,
     timeout_seconds: int = 600,
+    exclude_strand_ambiguous: bool = True,
 ) -> Path:
     """Filter target genotypes to cached panel.bim variant set + align
     REF/ALT axes via plink2 --alt1-allele.
@@ -125,6 +166,18 @@ def align_target_to_panel_bim(
     affected SNP's allele count). --alt1-allele forces the target's
     ALT1 column to match the panel's ALT1 column at every overlapping
     variant, flipping dosages where needed.
+
+    ``--alt1-allele`` matches by allele LETTER, so it cannot fix a
+    strand-ambiguous (A/T, C/G) SNP whose target is on the opposite
+    strand: the allele set is identical under complement, the forcing
+    "succeeds", and the dosage is silently inverted (see SCIENCE.md
+    D11). When ``exclude_strand_ambiguous`` is True (the default), such
+    panel SNPs are dropped from this projection via ``plink2 --exclude``
+    and a warning is logged. Caches built with build_panel_cache's
+    default guard contain no ambiguous SNPs, so this is a no-op for
+    them; it protects legacy caches that still contain them. Pass
+    False to keep them (only safe when target and panel are guaranteed
+    to share a strand convention, e.g. both reference-forward).
 
     The ``target_bed`` parameter accepts either a BED path (``.bed``
     + ``.bim`` + ``.fam`` triplet) or a PGEN path (``.pgen`` + ``.psam``
@@ -138,7 +191,39 @@ def align_target_to_panel_bim(
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # plink2 reads panel_bim for both --extract and --alt1-allele, and the
+    # strand-ambiguous scan below reads it directly; surface a missing
+    # reference as a PanelCacheError (the package's error contract) rather
+    # than a bare FileNotFoundError from the scan.
+    if not panel_bim.exists():
+        raise PanelCacheError(
+            f"align_target_to_panel_bim: panel .bim missing at {panel_bim}",
+        )
+
     input_flag, input_stem = _detect_target_format(target_bed)
+
+    # Strand-ambiguous (A/T, C/G) panel SNPs cannot be safely
+    # REF/ALT-harmonized by --alt1-allele (their allele set is invariant
+    # under strand flip, so an opposite-strand target is silently
+    # inverted). Exclude them from this projection by default; see
+    # SCIENCE.md D11. New caches built with build_panel_cache's default
+    # guard contain none, so this is a no-op for them.
+    exclude_args: list[str] = []
+    if exclude_strand_ambiguous:
+        ambiguous_ids = strand_ambiguous_variant_ids(panel_bim)
+        if ambiguous_ids:
+            exclude_path = append_suffix(
+                output_prefix, ".strand_ambiguous_exclude.txt",
+            )
+            exclude_path.write_text("\n".join(ambiguous_ids) + "\n")
+            exclude_args = ["--exclude", str(exclude_path)]
+            logger.warning(
+                "align_target_to_panel_bim: excluding %d strand-ambiguous "
+                "(A/T, C/G) panel SNP(s) from this projection to avoid "
+                "silent strand inversion; pass exclude_strand_ambiguous="
+                "False to keep them (see SCIENCE.md D11).",
+                len(ambiguous_ids),
+            )
 
     # Route through _call_runner so log_name (and pid_callback if a
     # future feature needs it) are forwarded to runners that support
@@ -149,6 +234,7 @@ def align_target_to_panel_bim(
         args=[
             input_flag, str(input_stem),
             "--extract", str(panel_bim),
+            *exclude_args,
             # --alt1-allele <bim_file> <alt-col> <id-col>
             # bim_file columns are 1-based: 2=ID, 5=ALT, 6=REF
             "--alt1-allele", str(panel_bim), "5", "2",
@@ -315,5 +401,7 @@ def reindex_dosage_to_panel_order(
 __all__ = [
     "align_target_to_panel_bim",
     "extract_target_dosage_via_plink2",
+    "is_strand_ambiguous",
     "reindex_dosage_to_panel_order",
+    "strand_ambiguous_variant_ids",
 ]

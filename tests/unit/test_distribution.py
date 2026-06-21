@@ -36,10 +36,17 @@ from admixture_cache.distribution import (
 # ─── fixture helpers ─────────────────────────────────────────────────────
 
 
-def _make_synthetic_cache_dir(tmp_path: Path, name: str = "synth") -> Path:
+def _make_synthetic_cache_dir(
+    tmp_path: Path, name: str = "synth",
+    extra_manifest: dict[str, Any] | None = None,
+) -> Path:
     """Build a minimal valid cache directory with the structure
     admixture-cache produces. The manifest is intentionally small;
-    every required field is set so `load_cache_manifest` succeeds."""
+    every required field is set so `load_cache_manifest` succeeds.
+
+    ``extra_manifest`` injects additional manifest keys, e.g. a field a
+    newer library version would write that this version does not know,
+    to exercise the forward-compatible (``extra='ignore'``) load path."""
     cache = tmp_path / name
     cache.mkdir(parents=True)
     # Numeric files — admixture-cache's load_cached_p reads these via
@@ -71,6 +78,8 @@ def _make_synthetic_cache_dir(tmp_path: Path, name: str = "synth") -> Path:
         "build_wallclock_seconds": 1.0,
         "build_timestamp": "2026-05-26T00:00:00+00:00",
     }
+    if extra_manifest:
+        manifest.update(extra_manifest)
     (cache / "manifest.json").write_text(json.dumps(manifest) + "\n")
     return cache
 
@@ -393,6 +402,30 @@ class TestDownloadCacheEndToEnd:
         assert installed == tmp_path / "root" / "synth"
         assert (installed / "manifest.json").is_file()
         assert (installed / "panel.3.P").is_file()
+
+    def test_forward_compat_unknown_manifest_field(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """A cache published by a NEWER admixture-cache carries manifest
+        fields this (older) consumer does not know. download_cache must
+        still install it, because PanelCacheManifest is extra='ignore' and
+        the post-extract load_cache_manifest tolerates the unknown key.
+        Guards the exact regression the extra='ignore' change prevents on
+        its load-bearing path (without this, extra='forbid' rejected the
+        SHA-valid tarball at distribution.py's manifest-validation step)."""
+        from admixture_cache import load_cache_manifest
+
+        cache = _make_synthetic_cache_dir(
+            tmp_path / "src", name="synth",
+            extra_manifest={"future_field_from_v9": {"nested": True}},
+        )
+        self._setup_mocks(monkeypatch, cache, flat=True)
+        installed = download_cache("synth", cache_root=tmp_path / "root")
+        assert (installed / "manifest.json").is_file()
+        # The installed manifest also loads cleanly via the library path.
+        m = load_cache_manifest(installed)
+        assert m.panel_id == "synth"
+        assert not hasattr(m, "future_field_from_v9")
 
     def test_happy_path_wrapped_tarball(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,

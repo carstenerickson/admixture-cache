@@ -29,7 +29,11 @@ from admixture_cache.alignment import (
     align_target_to_panel_bim,
     extract_target_dosage_via_plink2,
 )
-from admixture_cache.builder import build_panel_cache, ld_prune_panel
+from admixture_cache.builder import (
+    build_panel_cache,
+    ld_prune_panel,
+    strip_strand_ambiguous_snps,
+)
 from admixture_cache.distribution import (
     CacheRelease,
     download_cache,
@@ -56,6 +60,7 @@ __all__ = [
     # Public API — cache build (slow, one-time)
     "build_panel_cache",
     "ld_prune_panel",  # optional pre-step before build_panel_cache
+    "strip_strand_ambiguous_snps",  # pre-step: drop A/T, C/G SNPs (D11)
     # Public API — per-target projection (fast)
     "project_target",
     "numpy_supervised_projection",

@@ -42,6 +42,7 @@ def project_target(
     cache_dir: Path,
     plink2_runner: ToolRunner,
     work_dir: Path,
+    exclude_strand_ambiguous: bool = True,
 ) -> ProjectionResult:
     """End-to-end per-target projection:
     1. Validate cache exists + load manifest
@@ -50,6 +51,15 @@ def project_target(
     4. Load cached P matrix
     5. Run NumPy SLSQP projection
     6. Return ProjectionResult with Q vector + metadata
+
+    ``exclude_strand_ambiguous`` (default True) drops strand-ambiguous
+    (A/T, C/G) panel SNPs from the alignment, which cannot be safely
+    REF/ALT-harmonized and are silently strand-inverted for an
+    opposite-strand target (see SCIENCE.md D11). It is a no-op against a
+    cache built with build_panel_cache's default guard (which contains
+    none) and protects legacy caches that still contain them. Pass False
+    only when target and panel are guaranteed to share a strand
+    convention.
 
     Total wallclock: ~2 sec end-to-end on a typical 850K-SNP panel
     (excluding the 28-sec pandas .raw load that currently dominates;
@@ -99,6 +109,7 @@ def project_target(
         output_prefix=aligned_prefix,
         plink2_runner=plink2_runner,
         log_dir=call_dir / "logs",
+        exclude_strand_ambiguous=exclude_strand_ambiguous,
     )
 
     # Step 3: extract dosage as NumPy array

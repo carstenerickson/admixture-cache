@@ -7,25 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **`ld_prune_panel` parameter `window_kb` was a misnomer (SCIENCE.md
-  D7).** The value is passed straight to `plink2 --indep-pairwise` as a
-  bare integer, which plink2 interprets as a window in VARIANTS, not kb
-  (a kb window needs an explicit "kb" suffix AND a step of 1; plink2
-  rejects a kb window with any other step, so the documented "kb"
-  reading was never even valid alongside the default step of 5). The
-  conventional bare-integer prune the helper runs is a variant-count
-  window with a variant-count step, which is the intended and standard
-  behavior. Confirmed against plink2 v2.0.0. The rename itself is
-  behavior-preserving (a caller passing explicit parameters gets an
-  identical plink2 command): the parameter is renamed `window_size`, the
-  docstring and help now say "variants", and the old `window_kb` keyword
-  is still accepted as a deprecated alias (with a `DeprecationWarning`)
-  so existing callers do not break. The default values also change; see
-  Changed below.
+- **Strand-ambiguous (A/T, C/G) SNP handling (SCIENCE.md D11).** REF/ALT
+  harmonization via `plink2 --alt1-allele` matches by allele letter, so it
+  cannot fix a strand-ambiguous SNP whose target is on the opposite
+  strand: the allele set is invariant under complement, the forcing
+  "succeeds", and homozygous dosages are silently inverted (0<->2),
+  biasing Q. Confirmed empirically against plink2 v2.0.0. The fix is
+  on by default, with an opt-out at both stages:
+  - **Build-time guard.** `build_panel_cache` now refuses to build from a
+    panel that contains A/T or C/G SNPs (`exclude_strand_ambiguous=True`,
+    the default), so a cache is strand-safe by construction. Clean the
+    panel first with the new `strip_strand_ambiguous_snps` plink2 helper
+    (analogous to `ld_prune_panel`). Pass `exclude_strand_ambiguous=False`
+    (CLI `--keep-strand-ambiguous`) to keep them.
+  - **Projection-time guard.** `align_target_to_panel_bim` /
+    `project_target` now drop strand-ambiguous panel SNPs from the
+    alignment via `plink2 --exclude`, protecting caches built before this
+    release (which may still contain them) with no rebuild. By default
+    (`exclude_strand_ambiguous=None`) `project_target` excludes them
+    protectively, using the manifest only to skip needless work: a
+    build-certified-clean cache (`strand_ambiguous_excluded=True`) skips
+    the per-projection `panel.bim` scan, while a cache that may still
+    contain them (operator kept them at build, or a legacy pre-D11 cache)
+    has them excluded. Whether a target shares the panel's strand
+    convention is a per-(panel, target) property decided at projection,
+    not bakeable at build, so keeping ambiguous SNPs is a per-projection
+    opt-in (CLI `--keep-strand-ambiguous`, or `exclude_strand_ambiguous=
+    False`), deliberately not inherited from the build. Pass `True` to
+    force exclusion.
+  - **Manifest.** New optional `strand_ambiguous_excluded: bool | None`
+    field records the build's decision (`True` certified clean, `False`
+    opted to keep, `None` legacy). `schema_version` stays `1`; the field
+    is provenance only and not part of the cache-validity gate.
+  - New public helpers: `strip_strand_ambiguous_snps`,
+    `is_strand_ambiguous`, `strand_ambiguous_variant_ids`.
 
 ### Changed
+
+- **`PanelCacheManifest` now tolerates unknown fields
+  (`extra="ignore"`, was `extra="forbid"`).** Every optional field added
+  over the project's history (`panel_pop_sha256`,
+  `strand_ambiguous_excluded`, ...) kept `schema_version` at 1, and the
+  serialized manifest always includes the new key, so a cache published by
+  a newer library version was rejected on load by any older consumer
+  (the `download_cache` and `project_target` paths both call
+  `load_cache_manifest`, which `model_validate_json`s the manifest). With
+  `extra="ignore"`, an older consumer ignores fields it does not recognize
+  and loads the cache. Known-field types are still validated and tarball
+  integrity is still covered by the SHA-256 check; the manifest is
+  machine-written, so rejecting unknown keys bought little. Backward
+  compatibility (new code reading old manifests) is unchanged: absent
+  optional fields fall back to their defaults. Unknown keys are not
+  dropped *silently*: an unrecognized field (a newer library's field, or a
+  typo) is logged as a warning naming it, so a stale/mistyped key cannot
+  vanish without a trace.
 
 - **`ld_prune_panel` default raised to `--indep-pairwise 200 25 0.4`
   (was `50 5 0.5`), grounded in the literature (SCIENCE.md D7).** A
@@ -46,6 +83,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deprecated `window_kb`) are unaffected; only the defaults changed.
   `ld_prune_panel` is an optional pre-build helper, so this does not alter
   any existing cache.
+
+### Fixed
+
+- **`ld_prune_panel` parameter `window_kb` was a misnomer (SCIENCE.md
+  D7).** The value is passed straight to `plink2 --indep-pairwise` as a
+  bare integer, which plink2 interprets as a window in VARIANTS, not kb
+  (a kb window needs an explicit "kb" suffix AND a step of 1; plink2
+  rejects a kb window with any other step, so the documented "kb"
+  reading was never even valid alongside the default step of 5). The
+  conventional bare-integer prune the helper runs is a variant-count
+  window with a variant-count step, which is the intended and standard
+  behavior. Confirmed against plink2 v2.0.0. The rename itself is
+  behavior-preserving (a caller passing explicit parameters gets an
+  identical plink2 command): the parameter is renamed `window_size`, the
+  docstring and help now say "variants", and the old `window_kb` keyword
+  is still accepted as a deprecated alias (with a `DeprecationWarning`)
+  so existing callers do not break. The default values also change; see
+  Changed above.
 
 ## [1.5.0] - 2026-06-09
 

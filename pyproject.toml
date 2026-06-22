@@ -112,7 +112,12 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+# Analysis target is 3.12 even though runtime supports 3.11.4+ (see
+# requires-python). numpy>=2.5 ships PEP 695 `type` statements in its
+# bundled stubs (numpy/__init__.pyi), which mypy rejects as a syntax error
+# under a <3.12 target ("Type statement is only supported in Python 3.12
+# and greater"). The pytest matrix still exercises 3.11 at runtime.
+python_version = "3.12"
 strict = true
 files = ["src/admixture_cache"]
 

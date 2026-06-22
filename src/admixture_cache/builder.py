@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING, TypedDict, cast
 import numpy as np
 
 from admixture_cache._dispatch import _call_runner, _runner_supports
-from admixture_cache._paths import append_suffix
+from admixture_cache._paths import BED_SIBLINGS, append_suffix
+from admixture_cache.alignment import strand_ambiguous_variant_ids
 from admixture_cache.errors import PanelCacheError
 from admixture_cache.io import (
     load_cache_manifest,
@@ -157,6 +158,13 @@ def build_panel_cache(
     pgen_samplebind_version: str | None = None,
     seeds: list[int] | None = None,
     sd_threshold: float = 0.02,
+    # When True (default), refuse to build from a panel that contains
+    # strand-ambiguous (A/T, C/G) SNPs, which cannot be safely
+    # REF/ALT-harmonized at projection time and can be silently
+    # strand-inverted (see SCIENCE.md D11). Clean the panel first with
+    # strip_strand_ambiguous_snps (a plink2 step, like ld_prune_panel).
+    # Set False to keep them (not recommended).
+    exclude_strand_ambiguous: bool = True,
     threads: int = 16,
     # Per-restart timeout is enforced inside admixture_runner.run; see
     # per_restart_timeout_seconds below. Parallel-restart config below.
@@ -298,6 +306,42 @@ def build_panel_cache(
         logger.info(
             "build_panel_cache: cache at %s exists but stale (%s); rebuilding.",
             cache_dir, reason,
+        )
+
+    # Strand-ambiguous (A/T, C/G) SNP guard. Placed AFTER the idempotency
+    # short-circuit on purpose: a matching cache returns above as a no-op
+    # (the panel is never modified by a build, so the SHAs decide validity),
+    # and we only refuse to do *new* training work on an ambiguous panel.
+    # These SNPs cannot be safely REF/ALT-harmonized at projection time
+    # (their allele set is invariant under a strand flip, so `--alt1-allele`
+    # silently inverts an opposite-strand target, see SCIENCE.md D11), so
+    # we refuse to bake them into a fresh cache by default. The operator
+    # cleans the panel first with strip_strand_ambiguous_snps (a plink2
+    # step, like ld_prune_panel), then builds from the cleaned panel.
+    if exclude_strand_ambiguous:
+        ambiguous_ids = strand_ambiguous_variant_ids(panel_bim_path)
+        if ambiguous_ids:
+            raise PanelCacheError(
+                f"build_panel_cache: panel {panel_bim_path} contains "
+                f"{len(ambiguous_ids)} strand-ambiguous (A/T, C/G) SNP(s) "
+                f"(e.g. {', '.join(ambiguous_ids[:5])}). These cannot be "
+                f"safely REF/ALT-harmonized at projection time and can be "
+                f"silently strand-inverted for opposite-strand targets "
+                f"(SCIENCE.md D11). Clean the panel first with "
+                f"admixture_cache.strip_strand_ambiguous_snps(...) (a "
+                f"plink2 step, like ld_prune_panel), then build from the "
+                f"cleaned panel. To keep them anyway (only safe when every "
+                f"target shares the panel's strand convention), pass "
+                f"exclude_strand_ambiguous=False.",
+            )
+        strand_ambiguous_excluded = True
+    else:
+        strand_ambiguous_excluded = False
+        logger.warning(
+            "build_panel_cache: exclude_strand_ambiguous=False, "
+            "strand-ambiguous (A/T, C/G) SNPs will be retained in the "
+            "cache and can be silently strand-inverted for opposite-strand "
+            "targets at projection time (see SCIENCE.md D11).",
         )
 
     # Resolve the parallel-restart count. ``None`` triggers a
@@ -668,6 +712,7 @@ def build_panel_cache(
         cluster_order=cluster_order,
         geo_filter_yaml_shas=geo_shas,
         pgen_samplebind_version=pgen_samplebind_version,
+        strand_ambiguous_excluded=strand_ambiguous_excluded,
         build_wallclock_seconds=time.time() - t0,
         build_timestamp=datetime.now(UTC),
     )
@@ -1092,4 +1137,90 @@ def ld_prune_panel(
     return pruned_bed
 
 
-__all__ = ["build_panel_cache", "ld_prune_panel"]
+def strip_strand_ambiguous_snps(
+    *,
+    panel_bed: Path,
+    output_prefix: Path,
+    plink2_runner: ToolRunner,
+    log_dir: Path,
+    timeout_seconds: int = 3600,
+) -> Path:
+    """Drop strand-ambiguous (A/T, C/G) SNPs from a panel BED via plink2.
+
+    Strand-ambiguous SNPs have a base-pair representation that is
+    invariant under a strand flip, so the projection step's REF/ALT
+    harmonization (``plink2 --alt1-allele``, which matches by allele
+    LETTER) cannot detect an opposite-strand target and silently inverts
+    its dosage at those SNPs (homozygotes flip 0<->2). See SCIENCE.md
+    D11. Removing them up front is the standard fix.
+
+    Run this BEFORE :func:`build_panel_cache`, which refuses an ambiguous
+    panel by default. Analogous to :func:`ld_prune_panel`. Returns the
+    cleaned ``<output_prefix>.bed`` (with sibling .bim/.fam). When the
+    panel already has no ambiguous SNPs, the panel is copied through
+    unchanged so callers can use a single downstream path
+    unconditionally.
+
+    The ``.pop`` file is NOT carried through: it lists per-sample labels,
+    not per-variant data, so it stays valid for the cleaned variant set
+    as long as the sample set is unchanged (copy it next to the output).
+    """
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    panel_bim = panel_bed.with_suffix(".bim")
+    if not panel_bim.exists():
+        raise PanelCacheError(
+            f"strip_strand_ambiguous_snps: panel .bim missing at {panel_bim}",
+        )
+    ambiguous_ids = strand_ambiguous_variant_ids(panel_bim)
+    panel_prefix = panel_bed.with_suffix("")
+    tag = output_prefix.name
+
+    base_args = ["--bfile", str(panel_prefix)]
+    if ambiguous_ids:
+        exclude_path = append_suffix(output_prefix, ".strand_ambiguous.txt")
+        exclude_path.write_text("\n".join(ambiguous_ids) + "\n")
+        base_args += ["--exclude", str(exclude_path)]
+    else:
+        logger.info(
+            "strip_strand_ambiguous_snps: %s has no strand-ambiguous "
+            "(A/T, C/G) SNPs; copying through unchanged", panel_bed.name,
+        )
+
+    _call_runner(
+        plink2_runner,
+        args=[*base_args, "--make-bed", "--out", str(output_prefix)],
+        cwd=output_prefix.parent,
+        log_dir=log_dir,
+        timeout_seconds=timeout_seconds,
+        log_name=f"stripambig_{tag}.out",
+    )
+
+    triplet = {s: append_suffix(output_prefix, s) for s in BED_SIBLINGS}
+    pruned_bed = triplet[".bed"]
+    pruned_bim = triplet[".bim"]
+    missing = [p for p in triplet.values() if not p.exists()]
+    if missing:
+        raise PanelCacheError(
+            f"strip_strand_ambiguous_snps: plink2 produced an incomplete "
+            f"BED triplet at {output_prefix}; missing sibling file(s): "
+            f"{[p.name for p in missing]}; see {log_dir} for the plink2 log",
+        )
+
+    pre_count = sum(1 for _ in panel_bim.open())
+    post_count = sum(1 for _ in pruned_bim.open())
+    logger.info(
+        "strip_strand_ambiguous_snps: %s (%d variants) -> %s (%d retained, "
+        "%d strand-ambiguous A/T,C/G SNP(s) removed)",
+        panel_bed.name, pre_count, pruned_bed.name, post_count,
+        len(ambiguous_ids),
+    )
+    return pruned_bed
+
+
+__all__ = [
+    "build_panel_cache",
+    "ld_prune_panel",
+    "strip_strand_ambiguous_snps",
+]

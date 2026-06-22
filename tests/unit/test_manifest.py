@@ -103,9 +103,42 @@ class TestManifestSchema:
             assert m.track == track
             assert m.continent == continent
 
-    def test_extra_field_forbidden(self) -> None:
-        with pytest.raises(ValidationError):
-            PanelCacheManifest(**_good_manifest_kwargs(extra_field="nope"))  # type: ignore[arg-type]
+    def test_unknown_field_ignored_for_forward_compat(self) -> None:
+        """A manifest written by a NEWER library version (carrying fields
+        this version does not know) must still load: unknown keys are
+        ignored, not rejected, so the cache-distribution path stays forward
+        compatible. The real load path is `model_validate_json`
+        (io.load_cache_manifest), so exercise that, not just kwargs."""
+        base = PanelCacheManifest(**_good_manifest_kwargs())  # type: ignore[arg-type]
+        blob = json.loads(base.model_dump_json())
+        blob["future_field_from_v9"] = {"nested": "whatever"}
+        m = PanelCacheManifest.model_validate_json(json.dumps(blob))
+        assert not hasattr(m, "future_field_from_v9")
+        assert m.panel_id == base.panel_id
+        assert m.k == base.k
+
+    def test_unknown_field_is_warned_not_silent(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Forward-compat must not be *silent*: an unrecognized key (a
+        future field or a typo) still loads but emits a warning naming it,
+        so a stale/mistyped field cannot vanish without a trace."""
+        base = PanelCacheManifest(**_good_manifest_kwargs())  # type: ignore[arg-type]
+        blob = json.loads(base.model_dump_json())
+        blob["pgen_samplebind_versionn"] = "typo"  # misspelled real field
+        with caplog.at_level("WARNING", logger="admixture_cache.manifest"):
+            PanelCacheManifest.model_validate_json(json.dumps(blob))
+        assert "pgen_samplebind_versionn" in caplog.text
+        assert "unrecognized manifest" in caplog.text
+
+    def test_known_fields_do_not_warn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A manifest with only known keys (and absent optional ones)
+        must not warn — missing optional fields are not 'unknown'."""
+        with caplog.at_level("WARNING", logger="admixture_cache.manifest"):
+            PanelCacheManifest(**_good_manifest_kwargs())  # type: ignore[arg-type]
+        assert "unrecognized manifest" not in caplog.text
 
     def test_required_fields_enforced(self) -> None:
         kwargs = _good_manifest_kwargs()
@@ -471,9 +504,11 @@ class TestLegacyManifestReparse:
 
     def test_legacy_manifest_without_panel_pop_sha_loads_as_none(self) -> None:
         """The pre-field manifest JSON (no panel_pop_sha256 key) must
-        load — `extra='forbid'` rejects unknown keys, not absent
-        optional ones — and surface the field as None so the verify
-        leniency path engages."""
+        load and surface the field as None so the verify leniency path
+        engages. Absent optional fields fall back to their default
+        regardless of the extra= policy (the model is now extra='ignore';
+        forward-compat for unknown keys is covered by
+        test_unknown_field_ignored_for_forward_compat)."""
         m = PanelCacheManifest.model_validate_json(self._legacy_json())
         assert m.panel_pop_sha256 is None
 

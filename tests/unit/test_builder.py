@@ -1202,11 +1202,13 @@ class TestLdPrunePanel:
             output_prefix=tmp_path / "pruned",
             plink2_runner=runner,
             log_dir=tmp_path / "logs",
-            window_size=200, step_size=10, r2_threshold=0.2,
+            # Non-default values (default is 200/25/0.4) so each assertion
+            # proves pass-through rather than coinciding with a default.
+            window_size=123, step_size=10, r2_threshold=0.2,
         )
         args = runner.calls[0]
         idx = args.index("--indep-pairwise")
-        assert args[idx + 1] == "200"
+        assert args[idx + 1] == "123"
         assert args[idx + 2] == "10"
         assert args[idx + 3] == "0.2"
 
@@ -1218,17 +1220,20 @@ class TestLdPrunePanel:
         DeprecationWarning, so existing callers do not break."""
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)
         runner = _FakePlink2Runner()
+        # 77 is deliberately NOT the window_size default (200): if the
+        # window_kb -> window_size mapping were dropped, window_size would
+        # fall back to 200 and this assertion would catch it.
         with pytest.warns(DeprecationWarning, match="window_kb"):
             ld_prune_panel(
                 panel_bed=panel_bed,
                 output_prefix=tmp_path / "pruned",
                 plink2_runner=runner,
                 log_dir=tmp_path / "logs",
-                window_kb=200,
+                window_kb=77,
             )
         args = runner.calls[0]
         idx = args.index("--indep-pairwise")
-        assert args[idx + 1] == "200"  # honored, identical to window_size=200
+        assert args[idx + 1] == "77"  # alias value honored, not the 200 default
 
     def test_missing_prune_in_raises(self, tmp_path: Path) -> None:
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)

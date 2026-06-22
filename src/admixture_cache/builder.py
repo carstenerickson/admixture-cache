@@ -961,12 +961,22 @@ def _derive_cluster_order_from_pop_file(
     return seen
 
 
+# Default plink2 --indep-pairwise window for ld_prune_panel, in VARIANTS
+# (not kb). 200/25/0.4 is the dominant human ancient-DNA ADMIXTURE recipe;
+# see ld_prune_panel's docstring and SCIENCE.md D7.
+_DEFAULT_LD_PRUNE_WINDOW = 200
+
+
 def ld_prune_panel(
     *,
     panel_bed: Path,
     output_prefix: Path,
     plink2_runner: ToolRunner,
-    window_size: int = 200,
+    # Defaults to None (resolved to _DEFAULT_LD_PRUNE_WINDOW below) rather
+    # than a literal 200 so "caller passed window_size" is distinguishable
+    # from "caller left it default", which is needed to reject passing both
+    # window_size and the deprecated window_kb.
+    window_size: int | None = None,
     step_size: int = 25,
     r2_threshold: float = 0.4,
     log_dir: Path,
@@ -1021,7 +1031,12 @@ def ld_prune_panel(
             explicit "kb" suffix AND a step of 1 (plink2 rejects a kb
             window with any other step), so this value has never been kb.
             The old ``window_kb`` keyword (a misnomer) is still accepted
-            as a deprecated alias for this parameter.
+            as a deprecated alias for this parameter; passing both
+            ``window_size`` and ``window_kb`` raises ``TypeError``. Note
+            that ``window_kb`` sets only the window: a legacy
+            ``window_kb=...``-only call uses the current ``step_size`` and
+            ``r2_threshold`` defaults (25 and 0.4), not the pre-existing
+            5 and 0.5.
         step_size: --indep-pairwise step size in variants (default 25).
         r2_threshold: --indep-pairwise r² threshold (default 0.4).
         log_dir: Where to write plink2 logs.
@@ -1037,8 +1052,16 @@ def ld_prune_panel(
     just copy panel.pop next to the pruned output.)
     """
     # Back-compat: `window_kb` was a misnomer (the value is a variant
-    # count, not kb). Map it onto `window_size` with a deprecation warning.
+    # count, not kb). Map it onto `window_size` with a deprecation warning,
+    # but REJECT passing both (they set the same --indep-pairwise window,
+    # so silently letting one win would hide a caller mistake).
     if window_kb is not None:
+        if window_size is not None:
+            raise TypeError(
+                "ld_prune_panel: pass either window_size or the deprecated "
+                "window_kb, not both. They set the same --indep-pairwise "
+                "window; use window_size.",
+            )
         import warnings
 
         warnings.warn(
@@ -1050,6 +1073,8 @@ def ld_prune_panel(
             stacklevel=2,
         )
         window_size = window_kb
+    if window_size is None:
+        window_size = _DEFAULT_LD_PRUNE_WINDOW
 
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)

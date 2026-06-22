@@ -40,7 +40,9 @@ import pytest
 
 from admixture_cache import (
     SubprocessToolRunner,
+    align_target_to_panel_bim,
     build_panel_cache,
+    extract_target_dosage_via_plink2,
     project_target,
 )
 
@@ -342,3 +344,144 @@ class TestCacheReuse:
         assert manifest.k == 3
         assert manifest_path.read_bytes() == original_bytes
         assert manifest_path.stat().st_mtime == original_mtime
+
+
+# ─── D11: strand-ambiguous SNP inversion (real plink2) ────────────────────
+
+
+# PLINK 1 BED 2-bit genotype codes (see _generate_fixtures.py for the full
+# convention). We only need two fixed payloads here; their absolute
+# orientation is irrelevant — the test asserts what changes when the SAME
+# payload is read against a panel-matching vs. a strand-flipped .bim.
+_BED_HOM = 0b00   # a homozygous call
+_BED_HET = 0b10   # a heterozygous call
+
+# Panel for the D11 test: one A/T ambiguous SNP + one A/G non-ambiguous
+# control. The control keeps the variant set non-empty after exclusion so
+# the alignment still runs (and lets us prove the control is unaffected).
+_D11_PANEL: list[tuple[str, int, str, str, int]] = [
+    ("rsAMB", 1000, "A", "T", _BED_HOM),   # ambiguous, homozygous call
+    ("rsCTRL", 2000, "A", "G", _BED_HET),  # control, heterozygous call
+]
+
+
+def _write_single_sample_bed(
+    prefix: Path, snps: list[tuple[str, int, str, str, int]],
+) -> Path:
+    """Write a 1-sample BED triplet. ``snps`` is a list of
+    ``(variant_id, bp, allele1, allele2, bed_code)`` rows; each SNP is one
+    BED byte (the sample occupies bits 0-1). Returns the ``.bed`` path."""
+    prefix.with_suffix(".bim").write_text(
+        "\n".join(
+            f"1\t{vid}\t0\t{bp}\t{a1}\t{a2}" for vid, bp, a1, a2, _ in snps
+        ) + "\n",
+    )
+    prefix.with_suffix(".fam").write_text("F\tt\t0\t0\t0\t-9\n")
+    with prefix.with_suffix(".bed").open("wb") as f:
+        f.write(b"\x6c\x1b\x01")
+        f.write(bytes(code for *_, code in snps))
+    return prefix.with_suffix(".bed")
+
+
+class TestStrandAmbiguousInversionRealPlink2:
+    """D11 regression with the real plink2 binary — the empirically-confirmed
+    behavior the unit suite can only assert indirectly (it checks that
+    ``--exclude`` is *constructed*, not that plink2 actually inverts without
+    it). Runs at the align + dosage-extract seam where the bug lives; needs
+    no ADMIXTURE.
+
+    An A/T (strand-ambiguous) SNP's allele set is invariant under a strand
+    flip, so ``--alt1-allele <panel.bim>`` (which matches by allele LETTER,
+    not strand) silently inverts a homozygous opposite-strand target
+    (0 <-> 2). A control A/G SNP is immune (its flipped letters C/T do not
+    match the panel, so the forcing is skipped). The build/projection guard
+    drops the ambiguous SNP by default so no inversion can occur.
+    """
+
+    def _panel_bim(self, tmp_path: Path) -> Path:
+        _write_single_sample_bed(tmp_path / "panel", _D11_PANEL)
+        return tmp_path / "panel.bim"
+
+    def _aligned_dosage(
+        self, *, target_bed: Path, panel_bim: Path, work: Path,
+        exclude_strand_ambiguous: bool,
+    ) -> dict[str, float]:
+        """Run the real align + dosage-extract pipeline and return an
+        ``{variant_id: dosage}`` map (order-independent)."""
+        runner = SubprocessToolRunner("plink2")
+        aligned = align_target_to_panel_bim(
+            target_bed=target_bed, panel_bim=panel_bim,
+            output_prefix=work / "aligned", plink2_runner=runner,
+            log_dir=work / "logs",
+            exclude_strand_ambiguous=exclude_strand_ambiguous,
+        )
+        ids = [
+            line.split()[1]
+            for line in aligned.with_suffix(".bim").read_text().splitlines()
+            if line.strip()
+        ]
+        dosage = extract_target_dosage_via_plink2(
+            target_bed=aligned, output_prefix=work / "dosage",
+            plink2_runner=runner, log_dir=work / "logs",
+        )
+        return dict(zip(ids, [float(x) for x in dosage], strict=True))
+
+    def test_kept_ambiguous_snp_inverts_opposite_strand_homozygote(
+        self, tmp_path: Path,
+    ) -> None:
+        """With the SNP kept (exclude_strand_ambiguous=False), the SAME
+        genotype payload read against a strand-flipped A/T .bim yields the
+        INVERTED homozygous dosage, while the control A/G SNP is unchanged —
+        the silent corruption D11 prevents."""
+        panel_bim = self._panel_bim(tmp_path)
+
+        # Same payload, two allele orderings of the A/T SNP. "panel" matches
+        # the panel's A/T order; "flip" is the opposite-strand encoding (T/A).
+        # The control A/G SNP is identical in both.
+        panel_order = _write_single_sample_bed(
+            tmp_path / "t_panel",
+            [("rsAMB", 1000, "A", "T", _BED_HOM),
+             ("rsCTRL", 2000, "A", "G", _BED_HET)],
+        )
+        flipped = _write_single_sample_bed(
+            tmp_path / "t_flip",
+            [("rsAMB", 1000, "T", "A", _BED_HOM),
+             ("rsCTRL", 2000, "A", "G", _BED_HET)],
+        )
+
+        d_panel = self._aligned_dosage(
+            target_bed=panel_order, panel_bim=panel_bim,
+            work=tmp_path / "w_panel", exclude_strand_ambiguous=False,
+        )
+        d_flip = self._aligned_dosage(
+            target_bed=flipped, panel_bim=panel_bim,
+            work=tmp_path / "w_flip", exclude_strand_ambiguous=False,
+        )
+
+        # Control A/G SNP: strand flip cannot affect it (letters don't match).
+        assert d_flip["rsCTRL"] == d_panel["rsCTRL"]
+        # Ambiguous A/T SNP: the homozygote is silently inverted (0 <-> 2).
+        assert d_panel["rsAMB"] in (0.0, 2.0)
+        assert d_flip["rsAMB"] == 2.0 - d_panel["rsAMB"]
+        assert d_flip["rsAMB"] != d_panel["rsAMB"]
+
+    def test_default_exclusion_drops_ambiguous_snp(
+        self, tmp_path: Path,
+    ) -> None:
+        """With the default guard (exclude_strand_ambiguous=True), the A/T
+        SNP is dropped from the alignment entirely, so no inversion is
+        possible — the control A/G SNP survives and is scored normally."""
+        panel_bim = self._panel_bim(tmp_path)
+        flipped = _write_single_sample_bed(
+            tmp_path / "t_flip",
+            [("rsAMB", 1000, "T", "A", _BED_HOM),
+             ("rsCTRL", 2000, "A", "G", _BED_HET)],
+        )
+
+        dosage = self._aligned_dosage(
+            target_bed=flipped, panel_bim=panel_bim,
+            work=tmp_path / "w", exclude_strand_ambiguous=True,
+        )
+
+        assert "rsAMB" not in dosage  # ambiguous SNP excluded, cannot invert
+        assert "rsCTRL" in dosage     # control retained and scored

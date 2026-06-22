@@ -19,7 +19,11 @@ from admixture_cache import (
     align_target_to_panel_bim,
     extract_target_dosage_via_plink2,
 )
-from admixture_cache.alignment import reindex_dosage_to_panel_order
+from admixture_cache.alignment import (
+    is_strand_ambiguous,
+    reindex_dosage_to_panel_order,
+    strand_ambiguous_variant_ids,
+)
 
 
 class _MockRunner:
@@ -79,6 +83,15 @@ def _write_bed_triplet(tmp_path: Path, stem: str = "target") -> Path:
     return bed
 
 
+def _write_panel_bim(tmp_path: Path, name: str = "panel.bim") -> Path:
+    """Write a minimal NON-ambiguous panel .bim so
+    `align_target_to_panel_bim`'s strand-ambiguous scan (which reads
+    panel.bim) finds nothing to exclude. Returns the .bim path."""
+    path = tmp_path / name
+    path.write_text("1\trs1\t0\t1\tA\tC\n1\trs2\t0\t2\tA\tG\n")
+    return path
+
+
 class TestAlignTargetToPanelBim:
     @pytest.fixture(autouse=True)
     def _ensure_target_triplet(self, tmp_path: Path) -> None:
@@ -86,8 +99,11 @@ class TestAlignTargetToPanelBim:
         `_detect_target_format`; tests that pass `target.bed` paths
         now need the full BED triplet on disk. Autouse fixture
         creates one per-test so each test_* method's `tmp_path /
-        'target.bed'` resolves to a valid BED triplet."""
+        'target.bed'` resolves to a valid BED triplet. Also writes a
+        non-ambiguous panel.bim, which the strand-ambiguous scan now
+        reads on every alignment call."""
         _write_bed_triplet(tmp_path)
+        _write_panel_bim(tmp_path)
 
     def test_args_constructed_correctly(self, tmp_path: Path) -> None:
         runner = _MockRunner(emit_bed=True)
@@ -217,6 +233,7 @@ class TestAlignmentFullTripletValidation:
         full mid-write). Function must raise PanelCacheError naming
         which sibling files are missing."""
         _write_bed_triplet(tmp_path)
+        _write_panel_bim(tmp_path)
 
         class _BedOnlyRunner:
             """Emits the .bed but not .bim/.fam to simulate a
@@ -557,6 +574,7 @@ class TestProtocolConformance:
     @pytest.fixture(autouse=True)
     def _ensure_target_triplet(self, tmp_path: Path) -> None:
         _write_bed_triplet(tmp_path)
+        _write_panel_bim(tmp_path)
 
     def test_magicmock_runner_works(self, tmp_path: Path) -> None:
         runner = MagicMock()
@@ -578,6 +596,99 @@ class TestProtocolConformance:
             log_dir=tmp_path / "logs",
         )
         runner.run.assert_called_once()
+
+
+class TestStrandAmbiguousPredicate:
+    """D11: detecting strand-ambiguous (A/T, C/G) SNPs."""
+
+    @pytest.mark.parametrize(
+        "a1,a2",
+        [("A", "T"), ("T", "A"), ("C", "G"), ("G", "C"), ("a", "t"), ("c", "g")],
+    )
+    def test_ambiguous_pairs(self, a1: str, a2: str) -> None:
+        assert is_strand_ambiguous(a1, a2)
+
+    @pytest.mark.parametrize(
+        "a1,a2",
+        [("A", "G"), ("A", "C"), ("C", "T"), ("G", "T"), ("A", "A"), ("A", "0")],
+    )
+    def test_non_ambiguous_pairs(self, a1: str, a2: str) -> None:
+        assert not is_strand_ambiguous(a1, a2)
+
+    def test_strand_ambiguous_variant_ids_reads_bim(self, tmp_path: Path) -> None:
+        bim = tmp_path / "p.bim"
+        bim.write_text(
+            "1\tk1\t0\t1\tA\tC\n"   # ok
+            "1\tk2\t0\t2\tT\tA\n"   # ambiguous
+            "1\tk3\t0\t3\tC\tG\n"   # ambiguous
+            "1\tk4\t0\t4\tA\tG\n"   # ok
+        )
+        assert strand_ambiguous_variant_ids(bim) == ["k2", "k3"]
+
+
+class TestStrandAmbiguousExclusion:
+    """D11: strand-ambiguous (A/T, C/G) panel SNPs are excluded from the
+    projection alignment by default; --alt1-allele cannot strand-harmonize
+    them, so an opposite-strand target would be silently inverted."""
+
+    @pytest.fixture(autouse=True)
+    def _ensure_target_triplet(self, tmp_path: Path) -> None:
+        _write_bed_triplet(tmp_path)
+
+    def _write_mixed_panel_bim(self, tmp_path: Path) -> Path:
+        # rs1 A/C ok, rs2 A/T ambiguous, rs3 A/G ok, rs4 C/G ambiguous
+        path = tmp_path / "panel.bim"
+        path.write_text(
+            "1\trs1\t0\t1\tA\tC\n"
+            "1\trs2\t0\t2\tA\tT\n"
+            "1\trs3\t0\t3\tA\tG\n"
+            "1\trs4\t0\t4\tC\tG\n"
+        )
+        return path
+
+    def test_excludes_ambiguous_by_default(self, tmp_path: Path) -> None:
+        self._write_mixed_panel_bim(tmp_path)
+        runner = _MockRunner(emit_bed=True)
+        align_target_to_panel_bim(
+            target_bed=tmp_path / "target.bed",
+            panel_bim=tmp_path / "panel.bim",
+            output_prefix=tmp_path / "aligned",
+            plink2_runner=runner,
+            log_dir=tmp_path / "logs",
+        )
+        args = runner.calls[0]["args"]
+        assert "--exclude" in args
+        exclude_path = Path(args[args.index("--exclude") + 1])
+        assert exclude_path.exists()
+        assert sorted(exclude_path.read_text().split()) == ["rs2", "rs4"]
+        # --extract panel.bim is still present; --exclude is layered on top.
+        assert "--extract" in args
+        assert "--alt1-allele" in args
+
+    def test_keeps_ambiguous_when_disabled(self, tmp_path: Path) -> None:
+        self._write_mixed_panel_bim(tmp_path)
+        runner = _MockRunner(emit_bed=True)
+        align_target_to_panel_bim(
+            target_bed=tmp_path / "target.bed",
+            panel_bim=tmp_path / "panel.bim",
+            output_prefix=tmp_path / "aligned",
+            plink2_runner=runner,
+            log_dir=tmp_path / "logs",
+            exclude_strand_ambiguous=False,
+        )
+        assert "--exclude" not in runner.calls[0]["args"]
+
+    def test_no_exclude_when_panel_has_no_ambiguous(self, tmp_path: Path) -> None:
+        _write_panel_bim(tmp_path)  # A/C + A/G only
+        runner = _MockRunner(emit_bed=True)
+        align_target_to_panel_bim(
+            target_bed=tmp_path / "target.bed",
+            panel_bim=tmp_path / "panel.bim",
+            output_prefix=tmp_path / "aligned",
+            plink2_runner=runner,
+            log_dir=tmp_path / "logs",
+        )
+        assert "--exclude" not in runner.calls[0]["args"]
 
 
 class TestReindexDosageToPanelOrder:

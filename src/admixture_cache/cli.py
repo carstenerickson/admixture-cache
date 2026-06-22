@@ -143,6 +143,7 @@ def _cmd_build(ns: argparse.Namespace) -> int:
         pgen_samplebind_version=ns.pgen_samplebind_version,
         seeds=seeds,
         sd_threshold=ns.sd_threshold,
+        exclude_strand_ambiguous=not ns.keep_strand_ambiguous,
         threads=ns.threads,
         max_parallel_restarts=ns.max_parallel_restarts,
         numa_node_per_restart=ns.numa_node_per_restart,
@@ -160,6 +161,10 @@ def _cmd_project(ns: argparse.Namespace) -> int:
         cache_dir=ns.cache_dir,
         plink2_runner=runner,
         work_dir=ns.work_dir,
+        # None -> protective default (exclude unless the cache is certified
+        # clean); --keep-strand-ambiguous opts THIS projection into keeping
+        # them (only safe when the target shares the panel's strand convention).
+        exclude_strand_ambiguous=False if ns.keep_strand_ambiguous else None,
     )
     if ns.json:
         payload = {
@@ -347,6 +352,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="comma-separated seed list (default: 1,2,3,4,5)",
     )
     p_build.add_argument("--sd-threshold", type=float, default=0.02)
+    p_build.add_argument(
+        "--keep-strand-ambiguous", action="store_true",
+        help="keep strand-ambiguous (A/T, C/G) SNPs instead of refusing "
+        "to build from a panel that contains them. NOT recommended: such "
+        "SNPs can be silently strand-inverted at projection time "
+        "(SCIENCE.md D11). By default the build refuses an ambiguous "
+        "panel; clean it first with strip_strand_ambiguous_snps.",
+    )
     p_build.add_argument("--threads", type=int, default=16)
     p_build.add_argument(
         "--max-parallel-restarts", type=_parse_max_parallel_restarts,
@@ -403,6 +416,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_project.add_argument(
         "--json", action="store_true",
         help="emit machine-readable JSON instead of human-readable text",
+    )
+    p_project.add_argument(
+        "--keep-strand-ambiguous", action="store_true",
+        help="keep strand-ambiguous (A/T, C/G) panel SNPs in this "
+        "projection. By default they are excluded whenever the cache may "
+        "contain them (a build-certified-clean cache has none to exclude) "
+        "— these SNPs cannot be safely REF/ALT-harmonized and are silently "
+        "strand-inverted for an opposite-strand target (SCIENCE.md D11). "
+        "Only pass this when the target shares the panel's strand "
+        "convention; it is a per-projection opt-in, not inherited from how "
+        "the cache was built.",
     )
     p_project.set_defaults(func=_cmd_project)
 

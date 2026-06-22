@@ -44,13 +44,13 @@ silently:
    at both build time (`strip_strand_ambiguous_snps` plus a build guard)
    and projection time (`plink2 --exclude`), with a `--keep-strand-ambiguous`
    opt-out.
-3. **Pseudo-haploid / low-coverage handling** (D17): partially addressed
-   (Unreleased). The projection point estimate is NOT biased by pseudo-haploid
-   data coded as diploid (the diploid and Bernoulli likelihoods share an argmax,
-   verified), so no `ploidy` knob was added. A heterozygosity warning now flags
-   essentially-zero-het (pseudo-haploid / very low coverage) input; a
-   genotype-likelihood projection path (the real low-coverage improvement) is in
-   progress.
+3. **Pseudo-haploid / low-coverage handling** (D17): addressed (Unreleased).
+   The projection point estimate is NOT biased by pseudo-haploid data coded as
+   diploid (the diploid and Bernoulli likelihoods share an argmax, verified), so
+   no `ploidy` knob was added. A heterozygosity warning flags essentially-zero-het
+   (pseudo-haploid / very low coverage) input, and a genotype-likelihood
+   projection path (`project_target_gl` / CLI `--gl-beagle`, the real low-coverage
+   improvement) is now provided.
 4. **Restart default of 5** (D4): below the common 10 to 100 range for
    panels that contain unlabeled (free-Q) samples.
 5. **LD-pruning window units** (D7): RESOLVED (Unreleased). The `window_kb`
@@ -79,7 +79,7 @@ silently:
 | D14 | Stock ADMIXTURE convergence, 24h per-restart timeout | builder.py:183 | Sound with caveats |
 | D15 | Fully-labeled panel: near-closed-form P, seed-independent | builder.py:204 | Sound with caveats |
 | D16 | Cache validity gated on input SHA-256 | manifest.py; io.py:59 | Sound |
-| D17 | Diploid 0/1/2 dosage; pseudo-haploid handling | projection.py:95; orchestration.py | Sound with caveats (no projection bias; het warning added, GL path in progress) |
+| D17 | Diploid 0/1/2 dosage; pseudo-haploid + GL handling | projection.py:95; gl.py; orchestration.py | Sound (no projection bias; het warning + genotype-likelihood path added) |
 | D18 | K operator-specified, no CV diagnostic | builder.py:148 | Sound with caveats |
 | D19 | Point-estimate Q only, no uncertainty | projection.py:107 | Sound with caveats |
 | D20 | No MAF / QC inside projection | projection.py; alignment.py | Sound with caveats |
@@ -614,8 +614,9 @@ Binomial(g; 2, f) likelihood that hard-codes n=2 (`alignment.py:185-241`,
 `projection.py:95-99`). `project_target` now computes the target's
 heterozygosity and warns when it is essentially zero (Unreleased).
 
-**Verdict: Sound with caveats (the headline bias does not apply to this tool's
-projection; a low-coverage genotype-likelihood path is in progress).**
+**Verdict: Sound (the headline pseudo-haploid bias does not apply to this tool's
+projection; a heterozygosity warning and a low-coverage genotype-likelihood path
+are now provided; Unreleased).**
 
 **Key correction (verified analytically and numerically).** For pseudo-haploid
 hard calls (g in {0,2}) the diploid Binomial(2, f) negative log-likelihood is
@@ -642,13 +643,17 @@ parameter was therefore deliberately NOT added (it would be an inert knob).
   by itself separate those two (low-coverage diploid is also depressed,
   doi:10.1186/s12864-015-1219-8), so it is advisory and never changes the
   projection. The observed rate is reported on `ProjectionResult.heterozygosity`.
-- **Genotype-likelihood path (in progress).** The real improvement for genuinely
-  low-coverage data is a genotype-likelihood method (NGSadmix / fastNGSadmix),
-  whose per-site likelihood `GL(0)(1-f)^2 + GL(1)2f(1-f) + GL(2)f^2` downweights
-  uncertain sites and so does change (and improve) the point estimate, unlike
-  pseudo-haploid hard calls (Skotte et al., 2013, doi:10.1534/genetics.113.154138;
-  Bansal and Libiger, 2015, doi:10.1186/s12859-014-0418-7). Being added as a
-  beagle-GL projection path.
+- **Genotype-likelihood path (added, Unreleased).** The real improvement for
+  genuinely low-coverage data is a genotype-likelihood method (NGSadmix /
+  fastNGSadmix), whose per-site likelihood `GL(0)(1-f)^2 + GL(1)2f(1-f) +
+  GL(2)f^2` downweights uncertain sites and so does change (and improve) the
+  point estimate, unlike pseudo-haploid hard calls (Skotte et al., 2013,
+  doi:10.1534/genetics.113.154138; Bansal and Libiger, 2015,
+  doi:10.1186/s12859-014-0418-7). Provided as `project_target_gl` (CLI
+  `--gl-beagle`): reads an ANGSD-style beagle GL file, aligns it to the panel by
+  variant ID and allele-1 axis (dropping strand-ambiguous SNPs, D11), and solves
+  the marginalized model. Verified that a point-mass GL reproduces the hard-call
+  estimate exactly. No plink2 needed for this path.
 - **No reference-bias guard.** Pseudo-haploid aDNA is skewed toward the reference
   allele, pulling Q toward the reference-closest cluster; mapping bias alone
   shifts proportions by up to about 4% and persists even with genotype

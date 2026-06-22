@@ -7,13 +7,16 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from admixture_cache import (
     PanelCacheError,
     PanelCacheManifest,
+    ProjectionResult,
     sha256_file,
 )
+from admixture_cache import cli as cli_mod
 from admixture_cache.cli import (
     SubprocessToolRunner,
     _build_parser,
@@ -21,6 +24,68 @@ from admixture_cache.cli import (
     _parse_max_parallel_restarts,
     main,
 )
+
+
+def _fake_result() -> ProjectionResult:
+    return ProjectionResult(
+        target_q=np.array([0.6, 0.4]),
+        cluster_order=["c0", "c1"],
+        panel_stability_max_sd=0.01,
+        n_snps_used=123,
+        optimization_iterations=5,
+        converged=True,
+    )
+
+
+class TestProjectGLCli:
+    """The --gl-beagle route (SCIENCE.md D17): mutually exclusive with
+    --target-bed, needs no plink2/--work-dir, routes to project_target_gl."""
+
+    def test_gl_beagle_parses_without_target_or_workdir(self) -> None:
+        ns = _build_parser().parse_args(
+            ["project", "--gl-beagle", "t.beagle", "--cache-dir", "c"],
+        )
+        assert ns.gl_beagle == Path("t.beagle")
+        assert ns.target_bed is None
+
+    def test_target_bed_and_gl_beagle_mutually_exclusive(self) -> None:
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(
+                ["project", "--target-bed", "t", "--gl-beagle", "g",
+                 "--cache-dir", "c"],
+            )
+
+    def test_one_input_required(self) -> None:
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["project", "--cache-dir", "c"])
+
+    def test_gl_route_calls_project_target_gl(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_gl(**kwargs: object) -> ProjectionResult:
+            captured.update(kwargs)
+            return _fake_result()
+
+        monkeypatch.setattr(cli_mod, "project_target_gl", fake_gl)
+        rc = main([
+            "project", "--gl-beagle", "t.beagle", "--cache-dir", "c", "--json",
+        ])
+        assert rc == 0
+        assert captured["target_gl_beagle"] == Path("t.beagle")
+        assert "target_q" in capsys.readouterr().out
+
+    def test_target_bed_without_workdir_errors(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Should fail before constructing a runner / calling project_target.
+        monkeypatch.setattr(
+            cli_mod, "project_target",
+            lambda **kw: pytest.fail("project_target should not be called"),
+        )
+        rc = main(["project", "--target-bed", "t", "--cache-dir", "c"])
+        assert rc == 2
 
 
 class TestParser:

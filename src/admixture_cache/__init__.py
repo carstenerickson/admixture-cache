@@ -40,6 +40,7 @@ from admixture_cache.distribution import (
     list_available_caches,
 )
 from admixture_cache.errors import PanelCacheError, PopAutomationConfigError
+from admixture_cache.gl import BeagleGL, align_gl_to_panel, read_beagle_gl
 from admixture_cache.io import (
     load_cache_manifest,
     load_cached_p,
@@ -47,10 +48,11 @@ from admixture_cache.io import (
     verify_cache_matches_current_config,
 )
 from admixture_cache.manifest import PanelCacheManifest
-from admixture_cache.orchestration import project_target
+from admixture_cache.orchestration import project_target, project_target_gl
 from admixture_cache.projection import (
     ProjectionResult,
     numpy_supervised_projection,
+    numpy_supervised_projection_gl,
 )
 from admixture_cache.runner import ToolRunner
 
@@ -64,6 +66,12 @@ __all__ = [
     # Public API — per-target projection (fast)
     "project_target",
     "numpy_supervised_projection",
+    # Public API: genotype-likelihood projection (low-coverage / aDNA, D17)
+    "project_target_gl",
+    "numpy_supervised_projection_gl",
+    "read_beagle_gl",
+    "align_gl_to_panel",
+    "BeagleGL",
     # Public API — alignment + dosage I/O
     "align_target_to_panel_bim",
     "extract_target_dosage_via_plink2",

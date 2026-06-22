@@ -32,6 +32,12 @@ class ProjectionResult:
     n_snps_used: int  # non-missing SNPs after mask
     optimization_iterations: int
     converged: bool
+    # Observed heterozygosity rate (fraction of non-missing genotypes equal
+    # to 1) of the projected target. NaN when not computed. An
+    # essentially-zero rate flags pseudo-haploid or very low-coverage input
+    # (project_target warns; see SCIENCE.md D17). Defaulted so older direct
+    # constructions keep working.
+    heterozygosity: float = float("nan")
 
 
 def numpy_supervised_projection(
@@ -49,6 +55,18 @@ def numpy_supervised_projection(
         L(q) = ∏_s Binomial(g_s; 2, q^T P_s)
 
     Subject to: sum(q) = 1, q_k >= 0.
+
+    **Diploid hard-call model.** The dosage g in {0,1,2} is treated as
+    the count of allele 1 out of 2. Pseudo-haploid ancient-DNA data (one
+    sampled read coded as a homozygous 0/2 genotype) is accepted but note
+    that the diploid likelihood is then exactly twice the correct
+    Bernoulli (n=1) likelihood at every site, so the MLE point estimate of
+    Q is IDENTICAL either way (the constant factor cannot move the
+    argmax); only the unreported likelihood magnitude / implied confidence
+    differs. For low-coverage data where per-site uncertainty should
+    actually change the estimate, use a genotype-likelihood method
+    (see SCIENCE.md D17). project_target warns when a target's
+    heterozygosity looks pseudo-haploid / very low coverage.
 
     Matches stock ``admixture --supervised`` Q to within ~1e-3
     absolute on representative panels (≈0.002 max-component error on

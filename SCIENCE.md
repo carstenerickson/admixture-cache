@@ -44,9 +44,13 @@ silently:
    at both build time (`strip_strand_ambiguous_snps` plus a build guard)
    and projection time (`plink2 --exclude`), with a `--keep-strand-ambiguous`
    opt-out.
-3. **No pseudo-haploid path or detection** (D17): the dominant ancient-DNA
-   genotype format violates the n=2 binomial assumption and is accepted
-   silently.
+3. **Pseudo-haploid / low-coverage handling** (D17): partially addressed
+   (Unreleased). The projection point estimate is NOT biased by pseudo-haploid
+   data coded as diploid (the diploid and Bernoulli likelihoods share an argmax,
+   verified), so no `ploidy` knob was added. A heterozygosity warning now flags
+   essentially-zero-het (pseudo-haploid / very low coverage) input; a
+   genotype-likelihood projection path (the real low-coverage improvement) is in
+   progress.
 4. **Restart default of 5** (D4): below the common 10 to 100 range for
    panels that contain unlabeled (free-Q) samples.
 5. **LD-pruning window units** (D7): RESOLVED (Unreleased). The `window_kb`
@@ -75,7 +79,7 @@ silently:
 | D14 | Stock ADMIXTURE convergence, 24h per-restart timeout | builder.py:183 | Sound with caveats |
 | D15 | Fully-labeled panel: near-closed-form P, seed-independent | builder.py:204 | Sound with caveats |
 | D16 | Cache validity gated on input SHA-256 | manifest.py; io.py:59 | Sound |
-| D17 | Diploid additive 0/1/2 dosage, no pseudo-haploid path | alignment.py:185 | Sound with caveats |
+| D17 | Diploid 0/1/2 dosage; pseudo-haploid handling | projection.py:95; orchestration.py | Sound with caveats (no projection bias; het warning added, GL path in progress) |
 | D18 | K operator-specified, no CV diagnostic | builder.py:148 | Sound with caveats |
 | D19 | Point-estimate Q only, no uncertainty | projection.py:107 | Sound with caveats |
 | D20 | No MAF / QC inside projection | projection.py; alignment.py | Sound with caveats |
@@ -603,36 +607,53 @@ nf-core/eager, 2021, doi:10.7717/peerj.10947).
 - The restart budget is load-bearing (ADMIXTURE is multimodal) but is recorded
   for provenance only, not part of the validity key.
 
-## D17. Diploid additive 0/1/2 dosage, no pseudo-haploid path
+## D17. Diploid additive 0/1/2 dosage; pseudo-haploid handling
 
 **What we do.** The target is read as plink2 additive 0/1/2 dosages and fed to a
 Binomial(g; 2, f) likelihood that hard-codes n=2 (`alignment.py:185-241`,
-`projection.py:95-99`). There is no pseudo-haploid path.
+`projection.py:95-99`). `project_target` now computes the target's
+heterozygosity and warns when it is essentially zero (Unreleased).
 
-**Verdict: Sound with caveats.**
+**Verdict: Sound with caveats (the headline bias does not apply to this tool's
+projection; a low-coverage genotype-likelihood path is in progress).**
 
-**Literature.** For genuinely diploid, well-covered inputs (arrays,
-high-coverage WGS, imputed calls) this is the standard, correct model.
+**Key correction (verified analytically and numerically).** For pseudo-haploid
+hard calls (g in {0,2}) the diploid Binomial(2, f) negative log-likelihood is
+*exactly twice* the correct Bernoulli (n=1) negative log-likelihood at every
+site, so the two share an argmax: the projection's MLE point estimate of Q is
+**identical** whether the data is treated as diploid or pseudo-haploid (a
+constant factor cannot move the optimum; confirmed, max |Q_diff| about 4e-6).
+The large pseudo-haploid bias the literature documents (the step-function in the
+reply to Lazaridis and Reich, 2017, doi:10.1073/pnas.1704442114; failure to
+replicate, doi:10.1101/114124) arises in ADMIXTURE's **joint** estimation of P
+and Q with small reference panels, NOT in fixed-P projection. admixture-cache
+delegates the build to stock ADMIXTURE and only does fixed-P projection, so that
+bias is not in the projection path. The Bernoulli model is the statistically
+correct one for pseudo-haploid data (Stern et al., eLife 2022,
+doi:10.7554/elife.73767), but in this projection it changes only the unreported
+likelihood magnitude / implied confidence, not the returned Q. A `ploidy`
+parameter was therefore deliberately NOT added (it would be an inert knob).
 
 **Caveats and flags.**
 
-- **No pseudo-haploid path or detection (Flag).** The dominant representation for
-  low-coverage and ancient DNA is pseudo-haploid (one sampled read, coded as
-  homozygous). Treating it as diploid violates the n=2 assumption and drives
-  nonlinear ADMIXTURE bias, especially with small or structured reference
-  clusters (reply to Lazaridis and Reich, 2017, doi:10.1073/pnas.1704442114). A
-  pseudo-haploid sample has near-zero heterozygous sites, which the code could
-  cheaply detect and warn on, but does not.
+- **Heterozygosity warning (added, Unreleased).** `project_target` warns when the
+  observed heterozygosity is essentially zero, which flags pseudo-haploid /
+  haploidized data or a very low-coverage diploid sample. Heterozygosity cannot
+  by itself separate those two (low-coverage diploid is also depressed,
+  doi:10.1186/s12864-015-1219-8), so it is advisory and never changes the
+  projection. The observed rate is reported on `ProjectionResult.heterozygosity`.
+- **Genotype-likelihood path (in progress).** The real improvement for genuinely
+  low-coverage data is a genotype-likelihood method (NGSadmix / fastNGSadmix),
+  whose per-site likelihood `GL(0)(1-f)^2 + GL(1)2f(1-f) + GL(2)f^2` downweights
+  uncertain sites and so does change (and improve) the point estimate, unlike
+  pseudo-haploid hard calls (Skotte et al., 2013, doi:10.1534/genetics.113.154138;
+  Bansal and Libiger, 2015, doi:10.1186/s12859-014-0418-7). Being added as a
+  beagle-GL projection path.
 - **No reference-bias guard.** Pseudo-haploid aDNA is skewed toward the reference
   allele, pulling Q toward the reference-closest cluster; mapping bias alone
-  shifts proportions by up to about 4% (reference bias, 2019,
-  doi:10.1371/journal.pgen.1008302; Nielsen et al., 2024,
-  doi:10.1101/2024.07.01.601500).
-- **No genotype-likelihood path.** The preferred route for true low-coverage
-  data is genotype-likelihood admixture (NGSadmix / fastNGSadmix), which uses
-  read counts and uncertainty instead of hard calls (Skotte et al., 2013,
-  doi:10.1534/genetics.113.154138). The docstring should state that input must be
-  genuinely diploid, since AADR users routinely have pseudo-haploid data.
+  shifts proportions by up to about 4% and persists even with genotype
+  likelihoods (reference bias, 2019, doi:10.1371/journal.pgen.1008302; Nielsen et
+  al., 2024, doi:10.1101/2024.07.01.601500). Left as a documented caveat.
 
 ## D18. K operator-specified, no CV diagnostic
 

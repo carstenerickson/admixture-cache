@@ -7,16 +7,19 @@ here we cover the pure decision logic that does not need plink2.
 
 from __future__ import annotations
 
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from admixture_cache import PanelCacheManifest
 from admixture_cache import orchestration as orch
 from admixture_cache.orchestration import (
     _resolve_exclude_strand_ambiguous,
+    _warn_on_low_heterozygosity,
     project_target,
 )
 
@@ -152,3 +155,96 @@ class TestProjectTargetWiresStrandAmbiguous:
                 exclude_strand_ambiguous=False,
             )
         assert captured["exclude"] is False
+
+
+class TestLowHeterozygosityWarning:
+    """D17: project_target warns when a target's observed heterozygosity is
+    essentially zero (pseudo-haploid / haploidized data, or very low-coverage
+    diploid). Advisory only: it never changes the projection."""
+
+    def test_warns_at_zero_het(self) -> None:
+        with pytest.warns(UserWarning, match="heterozygosity"):
+            _warn_on_low_heterozygosity(0.0, 1000)
+
+    def test_warns_just_below_threshold(self) -> None:
+        with pytest.warns(UserWarning, match="heterozygosity"):
+            _warn_on_low_heterozygosity(0.004, 1000)
+
+    @pytest.mark.parametrize(
+        "het_rate,n_obs",
+        [
+            (0.20, 1000),        # clearly diploid -> no warning
+            (0.0051, 1000),      # just above threshold -> no warning
+            (float("nan"), 0),   # no observed SNPs -> no warning
+            (float("nan"), 100),  # het uncomputable -> no warning
+        ],
+    )
+    def test_no_warning(self, het_rate: float, n_obs: int) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning would raise
+            _warn_on_low_heterozygosity(het_rate, n_obs)
+
+
+class TestProjectTargetHeterozygosity:
+    """D17: project_target computes the target's heterozygosity, surfaces it
+    on ProjectionResult, and warns on essentially-zero het. The plink2 steps
+    are stubbed so this runs without binaries; the real SLSQP solve runs on a
+    small synthetic P + dosage."""
+
+    def _stub_pipeline(
+        self, monkeypatch: pytest.MonkeyPatch, dosage: np.ndarray, p: np.ndarray,
+    ) -> None:
+        monkeypatch.setattr(
+            orch, "align_target_to_panel_bim", lambda **kw: Path("aligned.bed"),
+        )
+        monkeypatch.setattr(
+            orch, "extract_target_dosage_via_plink2", lambda **kw: dosage,
+        )
+        monkeypatch.setattr(
+            orch, "reindex_dosage_to_panel_order", lambda **kw: dosage,
+        )
+        monkeypatch.setattr(orch, "load_cached_p", lambda cache_dir, k: p)
+
+    def test_pseudohaploid_warns_and_reports_zero_het(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rng = np.random.default_rng(0)
+        m = 400
+        p = np.column_stack([np.full(m, 0.8), np.full(m, 0.2)])
+        h = p @ np.array([0.5, 0.5])
+        # Pseudo-haploid: sample ONE allele per site -> dosage in {0, 2} only.
+        dosage = 2.0 * (rng.random(m) < h).astype(np.float64)
+        cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
+        self._stub_pipeline(monkeypatch, dosage, p)
+
+        with pytest.warns(UserWarning, match="heterozygosity"):
+            result = project_target(
+                target_bed=tmp_path / "target.bed",
+                cache_dir=cache,
+                plink2_runner=_unused_runner,
+                work_dir=tmp_path / "work",
+            )
+        assert result.heterozygosity == 0.0
+
+    def test_diploid_no_het_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rng = np.random.default_rng(1)
+        m = 400
+        p = np.column_stack([np.full(m, 0.8), np.full(m, 0.2)])
+        h = p @ np.array([0.5, 0.5])
+        dosage = rng.binomial(2, h).astype(np.float64)  # diploid: has 1s
+        cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
+        self._stub_pipeline(monkeypatch, dosage, p)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = project_target(
+                target_bed=tmp_path / "target.bed",
+                cache_dir=cache,
+                plink2_runner=_unused_runner,
+                work_dir=tmp_path / "work",
+            )
+        het_warnings = [w for w in caught if "heterozygosity" in str(w.message)]
+        assert het_warnings == []
+        assert result.heterozygosity > 0.05

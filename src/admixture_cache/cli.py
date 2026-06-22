@@ -174,11 +174,13 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             "n_snps_used": result.n_snps_used,
             "optimization_iterations": result.optimization_iterations,
             "converged": result.converged,
+            "heterozygosity": result.heterozygosity,
         }
         print(json.dumps(payload, indent=2))
     else:
         print(f"Converged: {result.converged}  iters: {result.optimization_iterations}")
         print(f"Non-missing SNPs used: {result.n_snps_used}")
+        print(f"Heterozygosity: {result.heterozygosity:.4f}")
         print(f"Panel stability max SD: {result.panel_stability_max_sd:.4f}")
         print("Q vector:")
         width = max(len(c) for c in result.cluster_order)

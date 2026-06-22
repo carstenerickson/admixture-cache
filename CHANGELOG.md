@@ -100,7 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docstring and help now say "variants", and the old `window_kb` keyword
   is still accepted as a deprecated alias (with a `DeprecationWarning`)
   so existing callers do not break. The default values also change; see
-  Changed above.
+  Changed above. Passing **both** `window_size` and the deprecated
+  `window_kb` now raises `TypeError` (they set the same window, so
+  silently letting one win would hide a caller mistake); `window_size`
+  defaults to `None` internally and resolves to
+  `DEFAULT_LD_PRUNE_WINDOW` (200) so an explicit value is distinguishable
+  from the default.
 
 ## [1.5.0] - 2026-06-09
 

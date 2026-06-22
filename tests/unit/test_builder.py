@@ -1237,6 +1237,26 @@ class TestLdPrunePanel:
         idx = args.index("--indep-pairwise")
         assert args[idx + 1] == "77"  # alias value honored, not the 200 default
 
+    def test_window_kb_and_window_size_both_raises(
+        self, tmp_path: Path,
+    ) -> None:
+        """Passing both the deprecated `window_kb` and the canonical
+        `window_size` is a caller mistake (they set the same
+        --indep-pairwise window): raise TypeError rather than silently
+        letting one win. No plink2 call should be made."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)
+        runner = _FakePlink2Runner()
+        with pytest.raises(TypeError, match="not both"):
+            ld_prune_panel(
+                panel_bed=panel_bed,
+                output_prefix=tmp_path / "pruned",
+                plink2_runner=runner,
+                log_dir=tmp_path / "logs",
+                window_size=200,
+                window_kb=200,
+            )
+        assert runner.calls == []
+
     def test_missing_prune_in_raises(self, tmp_path: Path) -> None:
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)
         runner = _FakePlink2Runner(emit_prune_in=False)

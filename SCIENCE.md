@@ -49,9 +49,11 @@ silently:
    silently.
 4. **Restart default of 5** (D4): below the common 10 to 100 range for
    panels that contain unlabeled (free-Q) samples.
-5. **LD-pruning window units** (D7): the `window_kb=50` argument is passed to
-   plink2 without a `kb` suffix, so plink2 reads it as a 50-variant window, not
-   50 kb. Verify intent.
+5. **LD-pruning window units** (D7): RESOLVED (Unreleased). The `window_kb`
+   parameter mislabeled a plink2 `--indep-pairwise` variant-count window as kb.
+   Renamed to `window_size` (documented as variants), `window_kb` kept as a
+   deprecated alias (passing both raises `TypeError`), and the default raised
+   from `50 5 0.5` to the field-standard `200 25 0.4`.
 
 ## Summary table
 
@@ -63,7 +65,7 @@ silently:
 | D4 | Number of random restarts (default 5) | builder.py:253 | Caution |
 | D5 | Best-loglikelihood restart selected as canonical | builder.py:569 | Sound with caveats |
 | D6 | Multimodality gate: max per-cell Q SD > 0.02 fails | builder.py:159, 596 | Sound with caveats |
-| D7 | Optional LD pruning (`--indep-pairwise 50 5 0.5`) | builder.py:919 | Sound with caveats |
+| D7 | Optional LD pruning (`--indep-pairwise 200 25 0.4`) | builder.py:919 | Sound (units fixed, default raised) |
 | D8 | Mean (not sum) per-SNP NLL objective | projection.py:90 | Sound |
 | D9 | SLSQP simplex optimization, single 1/K start | projection.py:107 | Sound |
 | D10 | Mask missing SNPs, score observed sites only | projection.py:80; alignment.py:263 | Sound with caveats |
@@ -288,13 +290,15 @@ correlation between Q matrices (Frichot and Francois, 2013, arXiv:1309.6208).
   discrepancy, not raw Q with a hard cutoff (Mimno et al., 2015,
   doi:10.1073/pnas.1412301112).
 
-## D7. Optional LD pruning before training (`--indep-pairwise 50 5 0.5`)
+## D7. Optional LD pruning before training (`--indep-pairwise 200 25 0.4`)
 
 **What we do.** An optional helper LD-prunes the panel via plink2
-`--indep-pairwise` with window 50, step 5, r-squared 0.5
-(`builder.py:919-1052`).
+`--indep-pairwise` with window 200, step 25, r-squared 0.4
+(`ld_prune_panel`, `builder.py`). The window is a variant count, not kb.
 
-**Verdict: Sound with caveats.**
+**Verdict: Sound (units clarified and default raised to match the field
+standard; Unreleased).** Originally `50 5 0.5` with a `window_kb` parameter
+that mislabeled the variant-count window as kb.
 
 **Literature.** The unlinked-marker assumption is fundamental to ADMIXTURE, and
 pruning before ADMIXTURE or PCA is standard practice; the ADMIXTURE paper itself
@@ -307,13 +311,18 @@ ADMIXTURE accuracy benchmarks are scarce (the justification is theoretical).
 
 **Caveats and flags.**
 
-- **Window units bug (Flag).** The code passes `str(window_kb)` = "50" to plink2
-  with no `kb` suffix, so plink2 interprets it as a 50-variant window, not 50 kb.
-  The parameter name and docstring say "kb". Verify intent; the actual pruning
-  window differs from the documented one.
-- **r-squared 0.5 is permissive.** It sits at the lenient end of the published
-  range (many AADR pipelines and the Lawson et al. simulations use 0.1 to 0.4),
-  leaving more residual background LD.
+- **Window units (RESOLVED, Unreleased).** The original code passed
+  `str(window_kb)` = "50" to plink2 with no `kb` suffix, so plink2 read it as a
+  50-variant window, not the 50 kb the parameter name and docstring implied
+  (confirmed against plink2 v2.0.0: a `kb` window also requires step 1, which the
+  default step of 5 violated, so the "kb" reading was never even valid). The
+  parameter is now `window_size`, documented as variants; `window_kb` remains a
+  deprecated alias, and passing both raises `TypeError`.
+- **r-squared default raised to 0.4 (RESOLVED, Unreleased).** The old `0.5` sat
+  at the lenient end of the published range; the default is now `0.4`, the modal
+  value in the human ancient-DNA ADMIXTURE literature (window 200, step 25). A
+  corpus methods survey found variant-count windows used over kb roughly 17:1
+  for this use case, with `200 25 0.4` the most common single recipe.
 - **Pruning removes only background LD, not admixture LD**, which can span tens
   of megabases in recently admixed panels, so the unlinked assumption is only
   partially satisfied. Information loss is real and is baked permanently into the

@@ -65,7 +65,7 @@ silently:
 | D4 | Number of random restarts (default 5) | builder.py:253 | Caution |
 | D5 | Best-loglikelihood restart selected as canonical | builder.py:569 | Sound with caveats |
 | D6 | Multimodality gate: max per-cell Q SD > 0.02 fails | builder.py:159, 596 | Sound with caveats |
-| D7 | Optional LD pruning (`--indep-pairwise 200 25 0.4`) | builder.py:919 | Sound (units fixed, default raised) |
+| D7 | Optional LD pruning (`--indep-pairwise 200 25 0.4`) | builder.py:970 | Sound (units fixed, default raised) |
 | D8 | Mean (not sum) per-SNP NLL objective | projection.py:90 | Sound |
 | D9 | SLSQP simplex optimization, single 1/K start | projection.py:107 | Sound |
 | D10 | Mask missing SNPs, score observed sites only | projection.py:80; alignment.py:263 | Sound with caveats |

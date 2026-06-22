@@ -1243,7 +1243,8 @@ class TestLdPrunePanel:
         """Passing both the deprecated `window_kb` and the canonical
         `window_size` is a caller mistake (they set the same
         --indep-pairwise window): raise TypeError rather than silently
-        letting one win. No plink2 call should be made."""
+        letting one win. Distinct values confirm the guard fires on
+        "both passed", not on "values disagree". No plink2 call is made."""
         panel_bed = _write_panel_triplet(tmp_path, n_samples=3, n_snps=5)
         runner = _FakePlink2Runner()
         with pytest.raises(TypeError, match="not both"):
@@ -1253,7 +1254,7 @@ class TestLdPrunePanel:
                 plink2_runner=runner,
                 log_dir=tmp_path / "logs",
                 window_size=200,
-                window_kb=200,
+                window_kb=50,
             )
         assert runner.calls == []
 

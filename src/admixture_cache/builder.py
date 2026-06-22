@@ -964,7 +964,7 @@ def _derive_cluster_order_from_pop_file(
 # Default plink2 --indep-pairwise window for ld_prune_panel, in VARIANTS
 # (not kb). 200/25/0.4 is the dominant human ancient-DNA ADMIXTURE recipe;
 # see ld_prune_panel's docstring and SCIENCE.md D7.
-DEFAULT_LD_PRUNE_WINDOW = 200
+_DEFAULT_LD_PRUNE_WINDOW = 200
 
 
 def ld_prune_panel(
@@ -972,7 +972,7 @@ def ld_prune_panel(
     panel_bed: Path,
     output_prefix: Path,
     plink2_runner: ToolRunner,
-    # Defaults to None (resolved to DEFAULT_LD_PRUNE_WINDOW below) rather
+    # Defaults to None (resolved to _DEFAULT_LD_PRUNE_WINDOW below) rather
     # than a literal 200 so "caller passed window_size" is distinguishable
     # from "caller left it default", which is needed to reject passing both
     # window_size and the deprecated window_kb.
@@ -1032,7 +1032,11 @@ def ld_prune_panel(
             window with any other step), so this value has never been kb.
             The old ``window_kb`` keyword (a misnomer) is still accepted
             as a deprecated alias for this parameter; passing both
-            ``window_size`` and ``window_kb`` raises ``TypeError``.
+            ``window_size`` and ``window_kb`` raises ``TypeError``. Note
+            that ``window_kb`` sets only the window: a legacy
+            ``window_kb=...``-only call uses the current ``step_size`` and
+            ``r2_threshold`` defaults (25 and 0.4), not the pre-existing
+            5 and 0.5.
         step_size: --indep-pairwise step size in variants (default 25).
         r2_threshold: --indep-pairwise r² threshold (default 0.4).
         log_dir: Where to write plink2 logs.
@@ -1070,7 +1074,7 @@ def ld_prune_panel(
         )
         window_size = window_kb
     if window_size is None:
-        window_size = DEFAULT_LD_PRUNE_WINDOW
+        window_size = _DEFAULT_LD_PRUNE_WINDOW
 
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Genotype-likelihood projection path for low-coverage / ancient DNA
+  (SCIENCE.md D17).** New `project_target_gl` (CLI `admixture-cache project
+  --gl-beagle <file>`) projects a target from per-site genotype likelihoods
+  instead of hard 0/1/2 calls, marginalizing over the unknown genotype under a
+  Hardy-Weinberg prior at the admixed frequency:
+  `L_s(q) = GL(0)(1-f)^2 + GL(1)2f(1-f) + GL(2)f^2` (the NGSadmix / fastNGSadmix
+  model; Skotte et al. 2013, doi:10.1534/genetics.113.154138; Bansal and Libiger
+  2015, doi:10.1186/s12859-014-0418-7). Unlike collapsing to hard calls, this
+  downweights low-confidence sites, the correct treatment for genuinely
+  low-coverage data.
+  - Input is an ANGSD-style **beagle GL** file for one individual; new
+    `read_beagle_gl` + `align_gl_to_panel` (module `admixture_cache.gl`) parse it
+    and align to the cached panel by variant ID and allele-1 axis (letters or
+    ANGSD 0/1/2/3 allele codes; strand-ambiguous A/T,C/G SNPs dropped per D11).
+    No plink2 is needed for the GL path; alignment is pure Python.
+  - New solver `numpy_supervised_projection_gl`. Verified that a point-mass GL
+    reproduces the hard-call estimate exactly (the marginal reduces to the
+    binomial pmf), and the analytic gradient matches finite differences.
+  - Mapping / reference bias is not corrected (it persists even with genotype
+    likelihoods, doi:10.1101/2024.07.01.601500); documented as a caveat.
+
 - **Heterozygosity warning for pseudo-haploid / low-coverage targets
   (SCIENCE.md D17).** `project_target` now computes the target's observed
   heterozygosity, reports it on `ProjectionResult.heterozygosity`, and emits a

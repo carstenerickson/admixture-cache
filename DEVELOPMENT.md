@@ -465,7 +465,7 @@ Why the values in `build_panel_cache`'s signature are what they are:
 | `threads` | `16` | Single-process ADMIXTURE scales linearly to ~16 threads on large panels (≥10K samples × ≥500K SNPs); beyond that memory bandwidth dominates. Conservatively safe default for cloud VMs. |
 | `per_restart_timeout_seconds` | `86400` (24 h) | K=21 regional cache on AADR v66 HO needs ~12-14 hr per restart to reach delta<0.0001; 24 h is tolerant of the slowest single-restart case. One-time cost so wallclock matters less than correctness. |
 | `max_parallel_restarts` | `None` (auto) | See memory-bandwidth heuristic section. |
-| LD-prune `window_kb` / `step_size` / `r2_threshold` | `50 / 5 / 0.5` | Standard ADMIXTURE manual recommendation; 30-50% variant retention on typical panels gives 3-5× total speedup. |
+| LD-prune `window_size` / `step_size` / `r2_threshold` | `200 / 25 / 0.4` | Dominant recipe in the human ancient-DNA ADMIXTURE literature for AADR 1240K / Human Origins panels (a methods survey finds variant-count windows over kb roughly 17:1, with 200/25/0.4 the most common single recipe; the ADMIXTURE-manual 50/10/0.1 is the main alternative). A plink2 `--indep-pairwise` window is a variant count, not kb. Retains ~450-600K SNPs on a ~1.1M-SNP 1240K panel. Pruning is correctness-first here because P is cached and reused. (`window_size` was named `window_kb` before; the old keyword still works as a deprecated alias.) |
 
 Changing any of these is a behavior change worth a CHANGELOG note.
 

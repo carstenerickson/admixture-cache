@@ -64,6 +64,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typo) is logged as a warning naming it, so a stale/mistyped key cannot
   vanish without a trace.
 
+- **`ld_prune_panel` default raised to `--indep-pairwise 200 25 0.4`
+  (was `50 5 0.5`), grounded in the literature (SCIENCE.md D7).** A
+  survey of human ancient-DNA ADMIXTURE methods sections (AADR 1240K and
+  Human Origins panels) found variant-count windows used over kb windows
+  roughly 17:1, with `200 25 0.4` by far the most common single recipe
+  (the Reich-lab / Human Origins house style, e.g. Cardial-LBK 2015
+  doi:10.1093/molbev/msv181, Late Neolithic Switzerland 2020
+  doi:10.1038/s41467-020-15560-x, Shimao 2025
+  doi:10.1038/s41586-025-09799-x; the ADMIXTURE-manual `50 10 0.1` is the
+  main alternative). The previous `50 5 0.5` default was valid but light:
+  a smaller window and the most permissive r² in common use. The new
+  default prunes more thoroughly on both window and r², matching the bulk
+  of the published reference literature, which matters because the
+  resulting P matrix is cached and reused on every projection. On a dense
+  ~1.1M-SNP 1240K panel it retains roughly 450-600K SNPs. Callers who
+  passed explicit `window_size`/`step_size`/`r2_threshold` (or the
+  deprecated `window_kb`) are unaffected; only the defaults changed.
+  `ld_prune_panel` is an optional pre-build helper, so this does not alter
+  any existing cache.
+
+### Fixed
+
+- **`ld_prune_panel` parameter `window_kb` was a misnomer (SCIENCE.md
+  D7).** The value is passed straight to `plink2 --indep-pairwise` as a
+  bare integer, which plink2 interprets as a window in VARIANTS, not kb
+  (a kb window needs an explicit "kb" suffix AND a step of 1; plink2
+  rejects a kb window with any other step, so the documented "kb"
+  reading was never even valid alongside the default step of 5). The
+  conventional bare-integer prune the helper runs is a variant-count
+  window with a variant-count step, which is the intended and standard
+  behavior. Confirmed against plink2 v2.0.0. The rename itself is
+  behavior-preserving (a caller passing explicit parameters gets an
+  identical plink2 command): the parameter is renamed `window_size`, the
+  docstring and help now say "variants", and the old `window_kb` keyword
+  is still accepted as a deprecated alias (with a `DeprecationWarning`)
+  so existing callers do not break. The default values also change; see
+  Changed above.
+
 ## [1.5.0] - 2026-06-09
 
 ### Added

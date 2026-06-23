@@ -74,7 +74,12 @@ class TestProjectGLCli:
         ])
         assert rc == 0
         assert captured["target_gl_beagle"] == Path("t.beagle")
-        assert "target_q" in capsys.readouterr().out
+        # The GL path has no hard genotypes -> heterozygosity is NaN, which is
+        # not valid JSON; the CLI must emit null and the output must parse.
+        import json as _json
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["heterozygosity"] is None
+        assert payload["target_q"] == [0.6, 0.4]
 
     def test_target_bed_without_workdir_errors(
         self, monkeypatch: pytest.MonkeyPatch,

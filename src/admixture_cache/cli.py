@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -190,7 +191,12 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             "n_snps_used": result.n_snps_used,
             "optimization_iterations": result.optimization_iterations,
             "converged": result.converged,
-            "heterozygosity": result.heterozygosity,
+            # NaN (e.g. the genotype-likelihood path, which has no hard genotype
+            # calls) is not valid JSON; emit null instead so the output parses.
+            "heterozygosity": (
+                None if math.isnan(result.heterozygosity)
+                else result.heterozygosity
+            ),
         }
         print(json.dumps(payload, indent=2))
     else:

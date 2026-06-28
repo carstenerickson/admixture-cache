@@ -229,7 +229,7 @@ def project_target(
     obs_mask = ~np.isnan(dosage)
     n_obs = int(obs_mask.sum())
     # Observed heterozygosity (fraction of non-missing genotypes == 1).
-    # Near-zero het with ploidy=2 flags likely pseudo-haploid input (D17).
+    # Near-zero het flags likely pseudo-haploid or very low-coverage input (D17).
     het_rate = float(np.mean(dosage[obs_mask] == 1)) if n_obs else float("nan")
     _warn_on_low_heterozygosity(het_rate, n_obs)
     logger.info(

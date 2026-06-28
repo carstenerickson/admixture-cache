@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Heterozygosity warning for pseudo-haploid / low-coverage targets
+  (SCIENCE.md D17).** `project_target` now computes the target's observed
+  heterozygosity, reports it on `ProjectionResult.heterozygosity`, and emits a
+  `UserWarning` when it is essentially zero (the signature of pseudo-haploid /
+  haploidized data, or a very low-coverage diploid sample, which heterozygosity
+  alone cannot distinguish). The warning is advisory and never changes the
+  projection.
+  - **Honest framing (verified).** Contrary to the naive reading of D17, feeding
+    pseudo-haploid hard calls (g in {0,2}) into the diploid Binomial(2, f)
+    likelihood does NOT bias this tool's projection point estimate: that
+    likelihood is exactly twice the correct Bernoulli (n=1) one at every site, so
+    the MLE argmax is identical (confirmed numerically, max |Q difference| about
+    4e-6). The large pseudo-haploid bias in the literature is in ADMIXTURE's
+    joint P+Q build with small panels, which admixture-cache delegates to stock
+    ADMIXTURE, not in fixed-P projection. A `ploidy` parameter was therefore
+    deliberately not added (it would be an inert knob). A genotype-likelihood
+    projection path, which genuinely improves low-coverage estimates, is being
+    added separately.
+
 - **Strand-ambiguous (A/T, C/G) SNP handling (SCIENCE.md D11).** REF/ALT
   harmonization via `plink2 --alt1-allele` matches by allele letter, so it
   cannot fix a strand-ambiguous SNP whose target is on the opposite

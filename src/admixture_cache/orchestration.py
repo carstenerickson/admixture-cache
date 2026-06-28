@@ -12,8 +12,10 @@ Total wallclock ~2 sec end-to-end on a typical 850K-SNP panel.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,6 +37,37 @@ if TYPE_CHECKING:
     from admixture_cache.runner import ToolRunner
 
 logger = logging.getLogger(__name__)
+
+# At/below this observed heterozygosity the target looks pseudo-haploid
+# (every site homozygous) OR very low-coverage diploid; the two are not
+# cleanly separable by heterozygosity alone (low-coverage diploid is also
+# depressed, doi:10.1186/s12864-015-1219-8), so this only WARNS (D17).
+_PSEUDOHAPLOID_HET_MAX = 0.005
+
+
+def _warn_on_low_heterozygosity(het_rate: float, n_obs: int) -> None:
+    """Warn when a target's observed heterozygosity is essentially zero,
+    which indicates pseudo-haploid / haploidized data or a very low-coverage
+    diploid sample (SCIENCE.md D17). Advisory only: it never changes the
+    projection. Note the hard-call projection point estimate is the SAME for
+    pseudo-haploid and diploid data (the diploid binomial likelihood is a
+    constant multiple of the Bernoulli one, so the MLE argmax is identical);
+    the caveat is that the diploid model overstates per-site information, and
+    for low-coverage data a genotype-likelihood method should inform the
+    estimate with per-site uncertainty."""
+    if n_obs == 0 or math.isnan(het_rate) or het_rate > _PSEUDOHAPLOID_HET_MAX:
+        return
+    warnings.warn(
+        f"project_target: observed heterozygosity is {het_rate:.4%} (near "
+        f"zero). This indicates pseudo-haploid / haploidized data (one sampled "
+        f"allele coded as homozygous) or a very low-coverage diploid sample. "
+        f"The hard-call projection point estimate is unaffected (pseudo-haploid "
+        f"and diploid yield the same Q here), but the diploid model overstates "
+        f"per-site information; for low-coverage targets a genotype-likelihood "
+        f"method should be preferred (see SCIENCE.md D17).",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def _resolve_exclude_strand_ambiguous(
@@ -95,6 +128,13 @@ def project_target(
     per-call opt-in via ``False`` (CLI ``--keep-strand-ambiguous``), only
     safe when this target shares the panel's strand convention; it is not
     inherited from the build. Pass ``True`` to force exclusion.
+
+    The returned :class:`ProjectionResult` records the target's observed
+    ``heterozygosity``; an essentially-zero rate emits a UserWarning that
+    the target looks pseudo-haploid or very low coverage (advisory only, it
+    never changes the result). The hard-call projection point estimate is
+    the same for pseudo-haploid and diploid input; for low-coverage targets
+    a genotype-likelihood method should be preferred (see SCIENCE.md D17).
 
     Total wallclock: ~2 sec end-to-end on a typical 850K-SNP panel
     (excluding the 28-sec pandas .raw load that currently dominates;
@@ -186,10 +226,16 @@ def project_target(
         )
 
     # Step 5: NumPy projection
-    n_obs = int((~np.isnan(dosage)).sum())
+    obs_mask = ~np.isnan(dosage)
+    n_obs = int(obs_mask.sum())
+    # Observed heterozygosity (fraction of non-missing genotypes == 1).
+    # Near-zero het flags likely pseudo-haploid or very low-coverage input (D17).
+    het_rate = float(np.mean(dosage[obs_mask] == 1)) if n_obs else float("nan")
+    _warn_on_low_heterozygosity(het_rate, n_obs)
     logger.info(
-        "project_target: projecting target on %d non-missing SNPs (of %d in P)",
-        n_obs, P.shape[0],
+        "project_target: projecting target on %d non-missing SNPs (of %d in P), "
+        "heterozygosity=%.4f",
+        n_obs, P.shape[0], het_rate,
     )
     q, n_iter, converged = numpy_supervised_projection(
         target_dosage=dosage, p_matrix=P, k=manifest.k,
@@ -207,6 +253,7 @@ def project_target(
         n_snps_used=n_obs,
         optimization_iterations=n_iter,
         converged=converged,
+        heterozygosity=het_rate,
     )
 
 

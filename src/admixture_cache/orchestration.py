@@ -40,6 +40,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Default minimum target-vs-panel overlapping-SNP count below which a projection
+# is refused (SCIENCE.md D10/D20). Ancestry proportions are unstable below
+# ~10,000-15,000 SNPs (Flegontov et al. 2020, doi:10.1101/2020.01.06.885103),
+# and real aDNA pipelines hard-floor at 20,000+ (Sirak et al. 2021,
+# doi:10.1038/s41467-021-27356-8); 10,000 is the lower edge. Pass 0 to disable.
+_DEFAULT_MIN_OVERLAP_SNPS = 10_000
+
+
+def _check_min_overlap(n_obs: int, min_overlap_snps: int) -> None:
+    """Refuse a projection whose usable target-vs-panel overlap is below
+    ``min_overlap_snps`` (SCIENCE.md D10/D20). A sparse target otherwise returns
+    a confident, converged-looking but meaningless Q. ``min_overlap_snps <= 0``
+    disables the check (opt out for knowingly-sparse targets)."""
+    if min_overlap_snps > 0 and n_obs < min_overlap_snps:
+        raise PanelCacheError(
+            f"project: target overlaps the panel at only {n_obs} usable SNP(s), "
+            f"below the minimum of {min_overlap_snps}. Ancestry proportions are "
+            f"unstable below ~10,000-15,000 SNPs (Flegontov et al. 2020, "
+            f"doi:10.1101/2020.01.06.885103), so this projection would likely "
+            f"return a confident but meaningless Q. Lower min_overlap_snps (CLI "
+            f"--min-overlap-snps; 0 disables) to override if you accept the "
+            f"uncertainty.",
+        )
+
+
 # At/below this observed heterozygosity the target looks pseudo-haploid
 # (every site homozygous) OR very low-coverage diploid; the two are not
 # cleanly separable by heterozygosity alone (low-coverage diploid is also
@@ -111,6 +136,7 @@ def project_target(
     plink2_runner: ToolRunner,
     work_dir: Path,
     exclude_strand_ambiguous: bool | None = None,
+    min_overlap_snps: int = _DEFAULT_MIN_OVERLAP_SNPS,
 ) -> ProjectionResult:
     """End-to-end per-target projection:
     1. Validate cache exists + load manifest
@@ -131,6 +157,14 @@ def project_target(
     per-call opt-in via ``False`` (CLI ``--keep-strand-ambiguous``), only
     safe when this target shares the panel's strand convention; it is not
     inherited from the build. Pass ``True`` to force exclusion.
+
+    ``min_overlap_snps`` (default 10,000) refuses the projection with a
+    :class:`PanelCacheError` when the target overlaps the panel at fewer usable
+    SNPs, because ancestry proportions are unstable below that range and a sparse
+    target otherwise returns a confident but meaningless Q (SCIENCE.md D10/D20).
+    Pass 0 to disable (knowingly-sparse targets). Note: contamination
+    authentication and platform/batch compatibility are the caller's
+    responsibility; this function does not check them.
 
     The returned :class:`ProjectionResult` records the target's observed
     ``heterozygosity``; an essentially-zero rate emits a UserWarning that
@@ -231,6 +265,9 @@ def project_target(
     # Step 5: NumPy projection
     obs_mask = ~np.isnan(dosage)
     n_obs = int(obs_mask.sum())
+    # Refuse too-sparse targets before the solve (D10/D20): a tiny overlap
+    # yields a confident but meaningless Q.
+    _check_min_overlap(n_obs, min_overlap_snps)
     # Observed heterozygosity (fraction of non-missing genotypes == 1).
     # Near-zero het flags likely pseudo-haploid or very low-coverage input (D17).
     het_rate = float(np.mean(dosage[obs_mask] == 1)) if n_obs else float("nan")
@@ -264,6 +301,7 @@ def project_target_gl(
     *, target_gl_beagle: Path,
     cache_dir: Path,
     exclude_strand_ambiguous: bool | None = None,
+    min_overlap_snps: int = _DEFAULT_MIN_OVERLAP_SNPS,
 ) -> ProjectionResult:
     """Project a target from genotype likelihoods (beagle GL file) against a
     cached panel (SCIENCE.md D17).
@@ -280,6 +318,10 @@ def project_target_gl(
     ``exclude_strand_ambiguous`` follows the same policy as
     :func:`project_target` (default ``None`` excludes A/T,C/G SNPs protectively
     unless the cache is certified clean; see SCIENCE.md D11).
+
+    ``min_overlap_snps`` (default 10,000; see :func:`project_target`) refuses a
+    too-sparse target before solving; the count is the number of informative GL
+    sites. Pass 0 to disable.
 
     The returned :class:`ProjectionResult` has ``heterozygosity`` = NaN (there
     are no hard genotype calls) and ``n_snps_used`` = the number of panel SNPs
@@ -314,6 +356,7 @@ def project_target_gl(
         )
 
     n_obs = int((~np.isnan(gl_panel).any(axis=1)).sum())
+    _check_min_overlap(n_obs, min_overlap_snps)
     logger.info(
         "project_target_gl: projecting target on %d usable GL sites (of %d in P)",
         n_obs, P.shape[0],

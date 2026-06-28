@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Minimum overlapping-SNP floor at projection (SCIENCE.md D10/D20).**
+  `project_target` and `project_target_gl` now refuse (raise `PanelCacheError`)
+  when the usable target-vs-panel overlap is below `min_overlap_snps` (default
+  10,000; CLI `--min-overlap-snps`; pass 0 to opt out). Ancestry proportions are
+  unstable below ~10,000-15,000 SNPs (Flegontov et al. 2020,
+  doi:10.1101/2020.01.06.885103) and real aDNA pipelines hard-floor at 20,000+
+  (Sirak et al. 2021, doi:10.1038/s41467-021-27356-8), so a sparse target would
+  otherwise return a confident but meaningless Q. Target-side contamination
+  authentication and platform/batch compatibility remain the caller's
+  responsibility (documented caveats, not checked here).
+
 - **Genotype-likelihood projection path for low-coverage / ancient DNA
   (SCIENCE.md D17).** New `project_target_gl` (CLI `admixture-cache project
   --gl-beagle <file>`) projects a target from per-site genotype likelihoods

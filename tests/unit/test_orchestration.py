@@ -15,9 +15,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from admixture_cache import PanelCacheManifest
+from admixture_cache import PanelCacheError, PanelCacheManifest
 from admixture_cache import orchestration as orch
 from admixture_cache.orchestration import (
+    _check_min_overlap,
     _resolve_exclude_strand_ambiguous,
     _warn_on_low_heterozygosity,
     project_target,
@@ -223,6 +224,7 @@ class TestProjectTargetHeterozygosity:
                 cache_dir=cache,
                 plink2_runner=_unused_runner,
                 work_dir=tmp_path / "work",
+                min_overlap_snps=0,  # tiny synthetic panel; disable the floor
             )
         assert result.heterozygosity == 0.0
 
@@ -244,7 +246,42 @@ class TestProjectTargetHeterozygosity:
                 cache_dir=cache,
                 plink2_runner=_unused_runner,
                 work_dir=tmp_path / "work",
+                min_overlap_snps=0,  # tiny synthetic panel; disable the floor
             )
         het_warnings = [w for w in caught if "heterozygosity" in str(w.message)]
         assert het_warnings == []
         assert result.heterozygosity > 0.05
+
+
+class TestMinOverlapFloor:
+    """D10/D20: refuse a target whose usable panel overlap is too small to give
+    a meaningful Q. The helper holds the policy; project_target enforces it."""
+
+    def test_helper_raises_below(self) -> None:
+        with pytest.raises(PanelCacheError, match="below the minimum"):
+            _check_min_overlap(400, 10_000)
+
+    def test_helper_ok_at_or_above(self) -> None:
+        _check_min_overlap(10_000, 10_000)  # boundary: not below -> no raise
+        _check_min_overlap(50_000, 10_000)
+
+    def test_helper_disabled_when_zero(self) -> None:
+        _check_min_overlap(1, 0)  # 0 disables the check -> no raise
+
+    def test_project_target_refuses_sparse_by_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The 400-SNP synthetic target is below the default 10k floor: refuse.
+        rng = np.random.default_rng(2)
+        m = 400
+        p = np.column_stack([np.full(m, 0.8), np.full(m, 0.2)])
+        dosage = rng.binomial(2, p @ np.array([0.5, 0.5])).astype(np.float64)
+        cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
+        TestProjectTargetHeterozygosity()._stub_pipeline(monkeypatch, dosage, p)
+        with pytest.raises(PanelCacheError, match="below the minimum"):
+            project_target(
+                target_bed=tmp_path / "target.bed",
+                cache_dir=cache,
+                plink2_runner=_unused_runner,
+                work_dir=tmp_path / "work",
+            )

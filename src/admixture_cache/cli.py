@@ -173,6 +173,7 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             target_gl_beagle=ns.gl_beagle,
             cache_dir=ns.cache_dir,
             exclude_strand_ambiguous=exclude,
+            min_overlap_snps=ns.min_overlap_snps,
         )
     else:
         if ns.work_dir is None:
@@ -188,6 +189,7 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             plink2_runner=runner,
             work_dir=ns.work_dir,
             exclude_strand_ambiguous=exclude,
+            min_overlap_snps=ns.min_overlap_snps,
         )
     if ns.json:
         payload = {
@@ -459,6 +461,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--plink2-binary", default="plink2",
         help="path to plink2 binary (default: looked up on PATH); "
         "used only with --target-bed",
+    )
+    p_project.add_argument(
+        "--min-overlap-snps", type=int, default=10_000,
+        help="refuse to project a target overlapping the panel at fewer than "
+        "this many usable SNPs (default 10000); ancestry is unstable below "
+        "~10000-15000 SNPs and a sparse target yields a meaningless Q "
+        "(SCIENCE.md D10/D20). Pass 0 to disable.",
     )
     p_project.add_argument(
         "--json", action="store_true",

@@ -375,7 +375,9 @@ class TestProjectTargetGLEndToEnd:
         )
         cache = _write_gl_cache(tmp_path, p, markers)
 
-        result = project_target_gl(target_gl_beagle=beagle, cache_dir=cache)
+        result = project_target_gl(
+            target_gl_beagle=beagle, cache_dir=cache, min_overlap_snps=0,
+        )
         assert result.converged
         assert result.n_snps_used == m
         assert np.isnan(result.heterozygosity)  # no hard genotypes in GL mode
@@ -401,8 +403,26 @@ class TestProjectTargetGLEndToEnd:
         )
         cache = _write_gl_cache(tmp_path, p, markers)
 
-        result = project_target_gl(target_gl_beagle=beagle, cache_dir=cache)
+        result = project_target_gl(
+            target_gl_beagle=beagle, cache_dir=cache, min_overlap_snps=0,
+        )
         assert result.converged
         # Only the informative sites count, not the flat no-coverage ones.
         assert result.n_snps_used == m - n_flat
         assert np.max(np.abs(result.target_q - q_true)) < 0.10
+
+    def test_refuses_sparse_target_by_default(self, tmp_path: Path) -> None:
+        # 3000 usable SNPs is below the default 10k floor (D10/D20): refuse.
+        rng = np.random.default_rng(9)
+        m, k = 3000, 3
+        p = rng.uniform(0.05, 0.95, size=(m, k))
+        markers = [f"rs{i}" for i in range(m)]
+        g = rng.binomial(2, p @ rng.dirichlet(np.ones(k)))
+        gl = np.zeros((m, 3))
+        gl[np.arange(m), g] = 1.0
+        beagle = _write_beagle(
+            tmp_path / "t.beagle", markers, ["G"] * m, ["A"] * m, gl,
+        )
+        cache = _write_gl_cache(tmp_path, p, markers)
+        with pytest.raises(PanelCacheError, match="below the minimum"):
+            project_target_gl(target_gl_beagle=beagle, cache_dir=cache)

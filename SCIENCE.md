@@ -36,8 +36,12 @@ read of the source.
 If you only act on a few items, these are the ones that can change a result
 silently:
 
-1. **No minimum overlapping-SNP floor** at projection (D10, D20): a sparse
-   target can return a confident, converged-looking Q that is meaningless.
+1. **Minimum overlapping-SNP floor** at projection (D10, D20): RESOLVED
+   (Unreleased). A sparse target could return a confident, converged-looking but
+   meaningless Q; `project_target` / `project_target_gl` now refuse below
+   `min_overlap_snps` (default 10,000; `--min-overlap-snps`, 0 to disable).
+   Target-side contamination and platform/batch QC remain the caller's
+   responsibility (documented caveats).
 2. **Strand-ambiguous A/T and C/G SNPs** (D11): RESOLVED (Unreleased).
    Previously ID-based `--alt1-allele` forcing could leave these on the
    wrong strand, silently inverting allele counts. Now excluded by default
@@ -72,7 +76,7 @@ silently:
 | D7 | Optional LD pruning (`--indep-pairwise 200 25 0.4`) | builder.py:970 | Sound (units fixed, default raised) |
 | D8 | Mean (not sum) per-SNP NLL objective | projection.py:90 | Sound |
 | D9 | SLSQP simplex optimization, single 1/K start | projection.py:107 | Sound |
-| D10 | Mask missing SNPs, score observed sites only | projection.py:80; alignment.py:263 | Sound with caveats |
+| D10 | Mask missing SNPs, score observed sites only | projection.py:80; alignment.py:263 | Sound (min-overlap floor added) |
 | D11 | REF/ALT harmonization via `--alt1-allele` | alignment.py:114 | Sound (ambiguous-SNP gap fixed) |
 | D12 | Restrict to target-intersect-panel SNP set | alignment.py:147 | Sound with caveats |
 | D13 | Clip expected frequency to [1e-9, 1-1e-9] | projection.py:96 | Sound with caveats |
@@ -82,7 +86,7 @@ silently:
 | D17 | Diploid 0/1/2 dosage; pseudo-haploid + GL handling | projection.py:95; gl.py; orchestration.py | Sound (no projection bias; het warning + genotype-likelihood path added) |
 | D18 | K operator-specified, no CV diagnostic | builder.py:148 | Sound with caveats |
 | D19 | Point-estimate Q only, no uncertainty | projection.py:107 | Sound with caveats |
-| D20 | No MAF / QC inside projection | projection.py; alignment.py | Sound with caveats |
+| D20 | No MAF / QC inside projection | projection.py; alignment.py | Sound with caveats (min-overlap floor added; contamination/batch delegated) |
 | D21 | Multimodality SD computed over all panel samples | builder.py:589 | Sound with caveats |
 | D22 | SLSQP `ftol=1e-9` | projection.py:39, 116 | Sound |
 | D23 | SLSQP `maxiter=200` | projection.py:39, 116 | Sound with caveats |
@@ -411,13 +415,15 @@ is standard).
 
 **Caveats and flags.**
 
-- **No minimum-overlap floor (Flag).** The code raises only at zero observed
-  SNPs. Ancestry proportions are documented as highly unstable below roughly
-  10,000 to 15,000 SNPs (Flegontov et al., 2020,
-  doi:10.1101/2020.01.06.885103), and real aDNA pipelines hard-code floors of
-  20,000 (Sirak et al., 2021, doi:10.1038/s41467-021-27356-8) and higher. A
-  target overlapping a few hundred SNPs returns a confident, wrong Q. Recommend
-  a configurable floor (order 10k to 20k) that warns or refuses.
+- **Minimum-overlap floor (RESOLVED, Unreleased).** Ancestry proportions are
+  documented as highly unstable below roughly 10,000 to 15,000 SNPs (Flegontov
+  et al., 2020, doi:10.1101/2020.01.06.885103), and real aDNA pipelines
+  hard-code floors of 20,000 (Sirak et al., 2021,
+  doi:10.1038/s41467-021-27356-8) and higher; a target overlapping a few hundred
+  SNPs would otherwise return a confident, meaningless Q. `project_target` and
+  `project_target_gl` now refuse (raise `PanelCacheError`) when the usable
+  target-vs-panel overlap is below `min_overlap_snps` (default 10,000; CLI
+  `--min-overlap-snps`; pass 0 to opt out for knowingly-sparse targets).
 - **Missing-at-random is violated by aDNA capture.** Which SNPs are observed is
   correlated with the assay (1240K poorly enriches about 28% of its own SNPs:
   Rohland et al., 2022, doi:10.1101/gr.276728.122) and with allele identity
@@ -727,9 +733,11 @@ an already-curated set. The genuine gap is target-side QC.
 
 **Caveats and flags.**
 
-- **No minimum overlapping-SNP floor (Flag).** Same gap as D10: ancestry is
-  unstable below roughly 10,000 to 15,000 SNPs (Flegontov et al., 2020,
-  doi:10.1101/2020.01.06.885103). Recommend gating on `n_snps_used`.
+- **Minimum overlapping-SNP floor (RESOLVED, Unreleased).** Same gap as D10,
+  now fixed: `project_target` / `project_target_gl` refuse a target whose usable
+  overlap is below `min_overlap_snps` (default 10,000; `--min-overlap-snps`,
+  0 to disable), since ancestry is unstable below ~10,000 to 15,000 SNPs
+  (Flegontov et al., 2020, doi:10.1101/2020.01.06.885103).
 - **No contamination flag for ancient targets.** Standard aDNA practice excludes
   samples above about 5% contamination; contamination corrupts the target dosage
   and biases Q toward the contaminant, and the code cannot detect it. If QC is

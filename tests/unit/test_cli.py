@@ -116,6 +116,24 @@ class TestProjectGLCli:
         ])
         assert "work-dir is ignored" in capsys.readouterr().err
 
+    def test_min_overlap_snps_default_and_override(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_gl(**kwargs: object) -> ProjectionResult:
+            captured.update(kwargs)
+            return _fake_result()
+
+        monkeypatch.setattr(cli_mod, "project_target_gl", fake_gl)
+        main(["project", "--gl-beagle", "t.beagle", "--cache-dir", "c"])
+        assert captured["min_overlap_snps"] == 10_000  # default
+        main([
+            "project", "--gl-beagle", "t.beagle", "--cache-dir", "c",
+            "--min-overlap-snps", "500",
+        ])
+        assert captured["min_overlap_snps"] == 500
+
 
 class TestParser:
     def test_version_flag(self, capsys: pytest.CaptureFixture[str]) -> None:

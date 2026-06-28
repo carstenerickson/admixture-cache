@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Genotype-likelihood projection path for low-coverage / ancient DNA
+  (SCIENCE.md D17).** New `project_target_gl` (CLI `admixture-cache project
+  --gl-beagle <file>`) projects a target from per-site genotype likelihoods
+  instead of hard 0/1/2 calls, marginalizing over the unknown genotype under a
+  Hardy-Weinberg prior at the admixed frequency:
+  `L_s(q) = GL(0)(1-f)^2 + GL(1)2f(1-f) + GL(2)f^2` (the NGSadmix / fastNGSadmix
+  model; Skotte et al. 2013, doi:10.1534/genetics.113.154138; Bansal and Libiger
+  2015, doi:10.1186/s12859-014-0418-7). Unlike collapsing to hard calls, this
+  downweights low-confidence sites, the correct treatment for genuinely
+  low-coverage data.
+  - Input is an ANGSD-style **beagle GL** file for one individual; new
+    `read_beagle_gl` + `align_gl_to_panel` (module `admixture_cache.gl`) parse it
+    and align to the cached panel by variant ID and allele-1 axis (letters or
+    ANGSD 0/1/2/3 allele codes; strand-ambiguous A/T,C/G SNPs dropped per D11).
+    No plink2 is needed for the GL path; alignment is pure Python.
+  - New solver `numpy_supervised_projection_gl`. Verified that a point-mass GL
+    reproduces the hard-call estimate exactly (the marginal reduces to the
+    binomial pmf), and the analytic gradient matches finite differences. The
+    solver normalizes each site's GL triple to sum to 1, so absolute GL
+    magnitude cannot affect the estimate (the per-site numerical floor is not
+    scale-invariant on its own); rows that are missing or carry no information
+    are masked. Flat / no-information GL triples (e.g. ANGSD's no-coverage
+    (1/3,1/3,1/3)) are treated as missing, so they neither inflate `n_snps_used`
+    nor, if every site is flat, leave the solver at the uniform start reporting
+    `converged=True` (it raises instead). `read_beagle_gl` reads marker/allele
+    columns verbatim (no float coercion of numeric IDs; `keep_default_na=False`
+    so blank / NA-token cells are not silently turned into the string "nan"),
+    rejects negative GLs (log/phred-scaled input), and rejects duplicate marker
+    IDs (which the alignment dict would otherwise collapse to the last row; the
+    hard-call path gets uniqueness from plink2).
+  - Mapping / reference bias is not corrected (it persists even with genotype
+    likelihoods, doi:10.1101/2024.07.01.601500); documented as a caveat.
+
 - **Heterozygosity warning for pseudo-haploid / low-coverage targets
   (SCIENCE.md D17).** `project_target` now computes the target's observed
   heterozygosity, reports it on `ProjectionResult.heterozygosity`, and emits a

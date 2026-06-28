@@ -144,7 +144,7 @@ type = "layers"
 layers = [
     "admixture_cache.cli",
     "admixture_cache.orchestration | admixture_cache.builder | admixture_cache.distribution",
-    "admixture_cache.io | admixture_cache._subprocess_runner",
+    "admixture_cache.io | admixture_cache._subprocess_runner | admixture_cache.gl",
     "admixture_cache.projection | admixture_cache.alignment | admixture_cache.manifest",
     "admixture_cache._dispatch | admixture_cache._paths",
     "admixture_cache.errors | admixture_cache.runner",

@@ -12,12 +12,17 @@ plink2-based target alignment + dosage load).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.optimize import minimize
 
 from admixture_cache.errors import PanelCacheError
+
+# A normalized GL triple with max-min at/below this is treated as flat
+# (uninformative): g0==g1==g2 makes the per-site likelihood constant in f.
+_GL_INFORMATIVE_TOL = 1e-9
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,108 @@ def numpy_supervised_projection(
         result: np.ndarray = -inv_m * (P_obs.T @ score)
         return result
 
+    return _minimize_on_simplex(neg_log_lik, grad_neg_log_lik, k, maxiter, ftol)
+
+
+def numpy_supervised_projection_gl(
+    *, gl: np.ndarray, p_matrix: np.ndarray, k: int,
+    eps: float = 1e-9, maxiter: int = 200, ftol: float = 1e-9,
+) -> tuple[np.ndarray, int, bool]:
+    """Genotype-likelihood supervised-ADMIXTURE projection (NGSadmix model).
+
+    Given per-SNP genotype likelihoods ``gl`` (M × 3, columns = P(reads |
+    genotype = 0/1/2 copies of allele 1)) and a fixed allele-frequency matrix
+    ``p_matrix`` (M × K, P[s,k] = freq of allele 1 in pop k), solve for the
+    target's K-vector admixture proportions q by maximum likelihood. Rows that
+    are NaN (missing) or carry no information (GL sum <= 0) are masked out; each
+    remaining site's GL triple is normalized to sum to 1 so absolute GL
+    magnitude cannot affect the estimate. Per SNP the unknown genotype is
+    marginalized out under a Hardy-Weinberg prior at the admixed frequency
+    f_s = q^T P_s:
+
+        L_s(q) = GL_s(0)·(1-f)^2 + GL_s(1)·2f(1-f) + GL_s(2)·f^2
+
+    maximizing prod_s L_s subject to sum(q)=1, q_k >= 0 (Skotte et al. 2013,
+    doi:10.1534/genetics.113.154138; fastNGSadmix is this fixed-P projection
+    setting). Unlike collapsing to hard 0/1/2 calls, this downweights
+    low-confidence sites, so for genuinely low-coverage data it changes (and
+    improves) the estimate. Like the hard-call objective the per-SNP NLL is
+    MEAN-normalized (÷ observed-SNP count) so SLSQP's tolerances behave the same
+    at any panel size. Returns (q, n_iter, converged).
+    """
+    assert gl.shape == (p_matrix.shape[0], 3), (
+        f"gl shape {gl.shape} != (P rows {p_matrix.shape[0]}, 3)"
+    )
+    assert p_matrix.shape[1] == k, (
+        f"P has {p_matrix.shape[1]} columns but k={k}"
+    )
+
+    # Usable sites are finite AND carry information (a positive GL sum). Rows
+    # that are NaN (missing) or all-zero are masked out. Each usable row is then
+    # normalized to sum to 1 so the absolute GL magnitude cannot affect the
+    # estimate: the per-site eps clip below is NOT scale-invariant, so tiny raw
+    # GLs would otherwise be floored to a flat objective and the solver would
+    # never leave the uniform start (a pure rescaling would change Q).
+    finite = ~np.isnan(gl).any(axis=1)
+    row_sums = np.where(finite, gl.sum(axis=1), np.nan)
+    mask = finite & (row_sums > 0)
+    if not mask.any():
+        raise PanelCacheError(
+            "numpy_supervised_projection_gl: target has zero usable GL sites "
+            "after masking (all missing or zero-information); cannot project.",
+        )
+    gl_obs = gl[mask] / row_sums[mask][:, None]
+    P_obs = p_matrix[mask]
+
+    # Drop flat triples (g0==g1==g2): their per-site likelihood is constant in f
+    # (zero gradient), so they carry no information and would inflate the
+    # mean-NLL denominator. If ALL usable rows are flat (e.g. an all-no-coverage
+    # target), there is nothing to fit and the solver would otherwise sit at the
+    # uniform start reporting converged=True, so raise instead. (align_gl_to_panel
+    # already drops these for the normal path; this guards direct callers.)
+    informative = (
+        gl_obs.max(axis=1) - gl_obs.min(axis=1)
+    ) > _GL_INFORMATIVE_TOL
+    if not informative.any():
+        raise PanelCacheError(
+            "numpy_supervised_projection_gl: all usable GL sites are "
+            "uninformative (flat genotype-likelihood triples); cannot project.",
+        )
+    gl_obs = gl_obs[informative]
+    P_obs = P_obs[informative]
+
+    g0 = gl_obs[:, 0]
+    g1 = gl_obs[:, 1]
+    g2 = gl_obs[:, 2]
+    inv_m = 1.0 / gl_obs.shape[0]
+
+    def neg_log_lik(q: np.ndarray) -> float:
+        f = np.clip(P_obs @ q, eps, 1 - eps)
+        like = g0 * (1 - f) ** 2 + g1 * 2 * f * (1 - f) + g2 * f * f
+        like = np.clip(like, eps, None)
+        return float(-inv_m * np.log(like).sum())
+
+    def grad_neg_log_lik(q: np.ndarray) -> np.ndarray:
+        f = np.clip(P_obs @ q, eps, 1 - eps)
+        like = g0 * (1 - f) ** 2 + g1 * 2 * f * (1 - f) + g2 * f * f
+        like = np.clip(like, eps, None)
+        # dL/df = -2 g0 (1-f) + 2 g1 (1-2f) + 2 g2 f; d(-log L)/dq via chain rule.
+        dlike_df = -2 * g0 * (1 - f) + 2 * g1 * (1 - 2 * f) + 2 * g2 * f
+        score = dlike_df / like
+        result: np.ndarray = -inv_m * (P_obs.T @ score)
+        return result
+
+    return _minimize_on_simplex(neg_log_lik, grad_neg_log_lik, k, maxiter, ftol)
+
+
+def _minimize_on_simplex(
+    neg_log_lik: Callable[[np.ndarray], float],
+    grad_neg_log_lik: Callable[[np.ndarray], np.ndarray],
+    k: int, maxiter: int, ftol: float,
+) -> tuple[np.ndarray, int, bool]:
+    """Minimize ``neg_log_lik`` over the probability simplex (sum(q)=1,
+    0<=q_k<=1) from the uniform start via SLSQP. Shared by the hard-call and
+    genotype-likelihood projections so both use the identical constraint setup."""
     result = minimize(
         neg_log_lik, np.ones(k) / k, jac=grad_neg_log_lik,
         method="SLSQP",
@@ -136,4 +243,8 @@ def numpy_supervised_projection(
     return result.x, result.nit, result.success
 
 
-__all__ = ["ProjectionResult", "numpy_supervised_projection"]
+__all__ = [
+    "ProjectionResult",
+    "numpy_supervised_projection",
+    "numpy_supervised_projection_gl",
+]

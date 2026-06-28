@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ from admixture_cache.io import (
     sha256_file,
     verify_cache_matches_current_config,
 )
-from admixture_cache.orchestration import project_target
+from admixture_cache.orchestration import project_target, project_target_gl
 
 
 def _detect_admixture_version(binary: str = "admixture") -> str | None:
@@ -155,17 +156,39 @@ def _cmd_build(ns: argparse.Namespace) -> int:
 
 
 def _cmd_project(ns: argparse.Namespace) -> int:
-    runner = SubprocessToolRunner(ns.plink2_binary)
-    result = project_target(
-        target_bed=ns.target_bed,
-        cache_dir=ns.cache_dir,
-        plink2_runner=runner,
-        work_dir=ns.work_dir,
-        # None -> protective default (exclude unless the cache is certified
-        # clean); --keep-strand-ambiguous opts THIS projection into keeping
-        # them (only safe when the target shares the panel's strand convention).
-        exclude_strand_ambiguous=False if ns.keep_strand_ambiguous else None,
-    )
+    # None -> protective default (exclude unless the cache is certified clean);
+    # --keep-strand-ambiguous opts THIS projection into keeping them (only safe
+    # when the target shares the panel's strand convention).
+    exclude = False if ns.keep_strand_ambiguous else None
+    if ns.gl_beagle is not None:
+        # Genotype-likelihood path: no plink2, no work-dir (alignment is by
+        # variant ID in pure Python).
+        if ns.work_dir is not None:
+            print(
+                "warning: --work-dir is ignored with --gl-beagle (the "
+                "genotype-likelihood path writes no intermediates)",
+                file=sys.stderr,
+            )
+        result = project_target_gl(
+            target_gl_beagle=ns.gl_beagle,
+            cache_dir=ns.cache_dir,
+            exclude_strand_ambiguous=exclude,
+        )
+    else:
+        if ns.work_dir is None:
+            print(
+                "error: --work-dir is required with --target-bed",
+                file=sys.stderr,
+            )
+            return 2
+        runner = SubprocessToolRunner(ns.plink2_binary)
+        result = project_target(
+            target_bed=ns.target_bed,
+            cache_dir=ns.cache_dir,
+            plink2_runner=runner,
+            work_dir=ns.work_dir,
+            exclude_strand_ambiguous=exclude,
+        )
     if ns.json:
         payload = {
             "target_q": result.target_q.tolist(),
@@ -174,13 +197,21 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             "n_snps_used": result.n_snps_used,
             "optimization_iterations": result.optimization_iterations,
             "converged": result.converged,
-            "heterozygosity": result.heterozygosity,
+            # NaN (e.g. the genotype-likelihood path, which has no hard genotype
+            # calls) is not valid JSON; emit null instead so the output parses.
+            "heterozygosity": (
+                None if math.isnan(result.heterozygosity)
+                else result.heterozygosity
+            ),
         }
         print(json.dumps(payload, indent=2))
     else:
         print(f"Converged: {result.converged}  iters: {result.optimization_iterations}")
         print(f"Non-missing SNPs used: {result.n_snps_used}")
-        print(f"Heterozygosity: {result.heterozygosity:.4f}")
+        if math.isnan(result.heterozygosity):
+            print("Heterozygosity: n/a (genotype-likelihood path)")
+        else:
+            print(f"Heterozygosity: {result.heterozygosity:.4f}")
         print(f"Panel stability max SD: {result.panel_stability_max_sd:.4f}")
         print("Q vector:")
         width = max(len(c) for c in result.cluster_order)
@@ -405,15 +436,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p_project = sub.add_parser(
         "project", help="project one target against an existing cache (fast).",
     )
-    p_project.add_argument("--target-bed", type=Path, required=True)
+    # Exactly one input: hard-call BED/PGEN (--target-bed) or genotype
+    # likelihoods (--gl-beagle, the low-coverage / ancient-DNA path; SCIENCE.md
+    # D17). The GL path needs no plink2 and no --work-dir.
+    p_target = p_project.add_mutually_exclusive_group(required=True)
+    p_target.add_argument("--target-bed", type=Path, default=None)
+    p_target.add_argument(
+        "--gl-beagle", type=Path, default=None,
+        help="project from an ANGSD-style beagle genotype-likelihood file "
+        "(single individual; marker column must match panel.bim variant IDs) "
+        "instead of a hard-call BED. The genotype-likelihood model downweights "
+        "low-confidence sites, the correct treatment for low-coverage / ancient "
+        "DNA (SCIENCE.md D17). No plink2 or --work-dir needed.",
+    )
     p_project.add_argument("--cache-dir", type=Path, required=True)
     p_project.add_argument(
-        "--work-dir", type=Path, required=True,
-        help="scratch dir for alignment + dosage intermediates",
+        "--work-dir", type=Path, default=None,
+        help="scratch dir for alignment + dosage intermediates "
+        "(required with --target-bed; unused with --gl-beagle)",
     )
     p_project.add_argument(
         "--plink2-binary", default="plink2",
-        help="path to plink2 binary (default: looked up on PATH)",
+        help="path to plink2 binary (default: looked up on PATH); "
+        "used only with --target-bed",
     )
     p_project.add_argument(
         "--json", action="store_true",

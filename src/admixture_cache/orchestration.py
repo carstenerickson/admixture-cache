@@ -27,10 +27,12 @@ from admixture_cache.alignment import (
     reindex_dosage_to_panel_order,
 )
 from admixture_cache.errors import PanelCacheError
+from admixture_cache.gl import align_gl_to_panel, read_beagle_gl
 from admixture_cache.io import load_cache_manifest, load_cached_p
 from admixture_cache.projection import (
     ProjectionResult,
     numpy_supervised_projection,
+    numpy_supervised_projection_gl,
 )
 
 if TYPE_CHECKING:
@@ -63,8 +65,9 @@ def _warn_on_low_heterozygosity(het_rate: float, n_obs: int) -> None:
         f"allele coded as homozygous) or a very low-coverage diploid sample. "
         f"The hard-call projection point estimate is unaffected (pseudo-haploid "
         f"and diploid yield the same Q here), but the diploid model overstates "
-        f"per-site information; for low-coverage targets a genotype-likelihood "
-        f"method should be preferred (see SCIENCE.md D17).",
+        f"per-site information; for low-coverage targets prefer the "
+        f"genotype-likelihood path (project_target_gl / CLI --gl-beagle), which "
+        f"downweights uncertain sites (SCIENCE.md D17).",
         UserWarning,
         stacklevel=3,
     )
@@ -257,4 +260,82 @@ def project_target(
     )
 
 
-__all__ = ["project_target"]
+def project_target_gl(
+    *, target_gl_beagle: Path,
+    cache_dir: Path,
+    exclude_strand_ambiguous: bool | None = None,
+) -> ProjectionResult:
+    """Project a target from genotype likelihoods (beagle GL file) against a
+    cached panel (SCIENCE.md D17).
+
+    The genotype-likelihood analog of :func:`project_target`: instead of
+    collapsing the target to hard 0/1/2 dosages, it carries per-site genotype
+    likelihoods and marginalizes over the unknown genotype under a
+    Hardy-Weinberg prior (the NGSadmix / fastNGSadmix model). This downweights
+    low-confidence sites, so for genuinely low-coverage data it changes (and
+    improves) the estimate relative to hard calls. No plink2 is needed: the
+    beagle file is matched to ``panel.bim`` by variant ID and oriented to the
+    panel's allele-1 axis in pure Python.
+
+    ``exclude_strand_ambiguous`` follows the same policy as
+    :func:`project_target` (default ``None`` excludes A/T,C/G SNPs protectively
+    unless the cache is certified clean; see SCIENCE.md D11).
+
+    The returned :class:`ProjectionResult` has ``heterozygosity`` = NaN (there
+    are no hard genotype calls) and ``n_snps_used`` = the number of panel SNPs
+    with usable GLs. Mapping / reference bias is not corrected (it persists even
+    with genotype likelihoods).
+    """
+    t0 = time.time()
+    manifest = load_cache_manifest(cache_dir)
+    panel_bim = cache_dir / "panel.bim"
+    if not panel_bim.exists():
+        raise PanelCacheError(
+            f"project_target_gl: cache missing panel.bim at {panel_bim}",
+        )
+
+    effective_exclude = _resolve_exclude_strand_ambiguous(
+        exclude_strand_ambiguous, manifest.strand_ambiguous_excluded,
+    )
+
+    beagle = read_beagle_gl(target_gl_beagle)
+    gl_panel = align_gl_to_panel(
+        beagle=beagle, panel_bim=panel_bim,
+        exclude_strand_ambiguous=effective_exclude,
+    )
+
+    P = load_cached_p(cache_dir, manifest.k)
+    if P.shape[0] != gl_panel.shape[0]:
+        raise PanelCacheError(
+            f"project_target_gl: cached P has {P.shape[0]} SNPs but the "
+            f"panel-aligned GL matrix has {gl_panel.shape[0]} rows; the cache "
+            f"is internally inconsistent (P row count != panel.bim variant "
+            f"count); rebuild the cache",
+        )
+
+    n_obs = int((~np.isnan(gl_panel).any(axis=1)).sum())
+    logger.info(
+        "project_target_gl: projecting target on %d usable GL sites (of %d in P)",
+        n_obs, P.shape[0],
+    )
+    q, n_iter, converged = numpy_supervised_projection_gl(
+        gl=gl_panel, p_matrix=P, k=manifest.k,
+    )
+    logger.info(
+        "project_target_gl: SLSQP %s in %d iters; Q = %s; total wallclock %.1fs",
+        "converged" if converged else "DID NOT CONVERGE", n_iter,
+        np.round(q, 6).tolist(), time.time() - t0,
+    )
+
+    return ProjectionResult(
+        target_q=q,
+        cluster_order=manifest.cluster_order,
+        panel_stability_max_sd=manifest.restart_sd_max,
+        n_snps_used=n_obs,
+        optimization_iterations=n_iter,
+        converged=converged,
+        heterozygosity=float("nan"),
+    )
+
+
+__all__ = ["project_target", "project_target_gl"]

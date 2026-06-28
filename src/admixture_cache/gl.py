@@ -37,6 +37,7 @@ SCIENCE.md D17).
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,13 @@ import numpy as np
 
 from admixture_cache.alignment import is_strand_ambiguous
 from admixture_cache.errors import PanelCacheError
+
+# A site whose GL triple is (nearly) flat (g0==g1==g2) carries no information:
+# the per-site likelihood g0(1-f)^2 + g1*2f(1-f) + g2*f^2 is then constant in f.
+# ANGSD writes no-coverage sites as the flat (1/3,1/3,1/3) triple. Such rows are
+# treated as missing (NaN) so they neither inflate the used-SNP count nor leave
+# the solver stuck at the uniform start. Relative tolerance: max-min <= tol*sum.
+_UNINFORMATIVE_REL_TOL = 1e-9
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +95,12 @@ def read_beagle_gl(path: Path) -> BeagleGL:
     # Read everything as strings: the marker/allele columns must stay verbatim
     # (a numeric marker like "100" must not be inferred as float and become
     # "100.0", which would never match panel.bim's "100"), and the GL columns
-    # are converted to float explicitly below.
-    df = pd.read_csv(path, sep="\t", dtype=str)
+    # are converted to float explicitly below. keep_default_na=False stops pandas
+    # turning blank or NA-token cells ("", "NA", "null", ...) into a float NaN
+    # that str() would render as the literal "nan" (a marker that silently never
+    # matches; an allele that decodes to None); blank GL cells then surface as a
+    # clear "not numeric" error rather than being silently dropped.
+    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
     if df.shape[1] != 6:
         raise PanelCacheError(
             f"read_beagle_gl: expected 6 columns (marker, allele1, allele2, and "
@@ -117,6 +129,16 @@ def read_beagle_gl(path: Path) -> BeagleGL:
             f"read_beagle_gl: {path} contains negative genotype likelihoods. "
             f"This path expects linear-probability beagle GLs (non-negative); "
             f"log- or phred-scaled likelihoods are not supported.",
+        )
+    # Variant IDs must be unique: align_gl_to_panel maps marker -> row via a
+    # dict, so a duplicate marker would silently keep only its last row's GLs.
+    # The hard-call path gets this guarantee from plink2 --extract; enforce it
+    # here too rather than silently project on the wrong per-site likelihoods.
+    dups = [m for m, n in Counter(marker_ids).items() if n > 1]
+    if dups:
+        raise PanelCacheError(
+            f"read_beagle_gl: {path} has duplicate marker IDs (e.g. "
+            f"{', '.join(dups[:5])}); beagle variant IDs must be unique.",
         )
     return BeagleGL(
         marker_ids=marker_ids, allele1=allele1, allele2=allele2, gl=gl,
@@ -175,17 +197,24 @@ def align_gl_to_panel(
 
     Returns an ``(M_panel, 3)`` array of GL triples indexed by the count of the
     panel's allele 1, in ``panel.bim`` order. Panel SNPs absent from the beagle
-    file, with incompatible alleles, or (when ``exclude_strand_ambiguous``)
-    strand-ambiguous (A/T, C/G) are left as a row of NaN, which the GL
-    projection masks out as missing. This is the GL analog of
-    ``align_target_to_panel_bim`` + ``reindex_dosage_to_panel_order``, done in
-    pure Python.
+    file, with incompatible alleles, with an uninformative (flat) GL triple
+    (e.g. ANGSD's no-coverage (1/3,1/3,1/3)), or (when
+    ``exclude_strand_ambiguous``) strand-ambiguous (A/T, C/G) are left as a row
+    of NaN, which the GL projection masks out as missing. This is the GL analog
+    of ``align_target_to_panel_bim`` + ``reindex_dosage_to_panel_order``, done
+    in pure Python.
+
+    Note: with ``exclude_strand_ambiguous=False`` an A/T or C/G SNP whose target
+    is on the opposite strand is oriented by allele label alone and its GL axis
+    can be silently flipped (the same risk as the hard-call path; SCIENCE.md
+    D11). Keep the default unless the target shares the panel's strand
+    convention.
     """
     panel = _read_panel_bim_alleles(panel_bim)
     beagle_index = {m: i for i, m in enumerate(beagle.marker_ids)}
     out = np.full((len(panel), 3), np.nan, dtype=np.float64)
 
-    n_placed = n_missing = n_ambiguous = n_allele_mismatch = 0
+    n_placed = n_missing = n_ambiguous = n_allele_mismatch = n_uninformative = 0
     for j, (vid, pa1, pa2) in enumerate(panel):
         if exclude_strand_ambiguous and is_strand_ambiguous(pa1, pa2):
             n_ambiguous += 1
@@ -203,14 +232,21 @@ def align_gl_to_panel(
         if oriented is None:
             n_allele_mismatch += 1
             continue
+        # Drop flat / no-information triples (g0==g1==g2, e.g. ANGSD no-coverage
+        # (1/3,1/3,1/3)): they carry no signal, so counting them would overstate
+        # the usable-SNP total. Treated as missing (left NaN).
+        if oriented.max() - oriented.min() <= _UNINFORMATIVE_REL_TOL * oriented.sum():
+            n_uninformative += 1
+            continue
         out[j] = oriented
         n_placed += 1
 
     logger.info(
         "align_gl_to_panel: placed %d/%d panel SNPs from the beagle file "
-        "(%d panel SNPs missing from target, %d strand-ambiguous excluded, "
+        "(%d missing from target, %d uninformative, %d strand-ambiguous excluded, "
         "%d allele-incompatible)",
-        n_placed, len(panel), n_missing, n_ambiguous, n_allele_mismatch,
+        n_placed, len(panel), n_missing, n_uninformative, n_ambiguous,
+        n_allele_mismatch,
     )
     if n_placed == 0:
         raise PanelCacheError(

@@ -30,8 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     solver normalizes each site's GL triple to sum to 1, so absolute GL
     magnitude cannot affect the estimate (the per-site numerical floor is not
     scale-invariant on its own); rows that are missing or carry no information
-    are masked. `read_beagle_gl` reads marker/allele columns verbatim (no float
-    coercion of numeric IDs) and rejects negative GLs (log/phred-scaled input).
+    are masked. Flat / no-information GL triples (e.g. ANGSD's no-coverage
+    (1/3,1/3,1/3)) are treated as missing, so they neither inflate `n_snps_used`
+    nor, if every site is flat, leave the solver at the uniform start reporting
+    `converged=True` (it raises instead). `read_beagle_gl` reads marker/allele
+    columns verbatim (no float coercion of numeric IDs; `keep_default_na=False`
+    so blank / NA-token cells are not silently turned into the string "nan"),
+    rejects negative GLs (log/phred-scaled input), and rejects duplicate marker
+    IDs (which the alignment dict would otherwise collapse to the last row; the
+    hard-call path gets uniqueness from plink2).
   - Mapping / reference bias is not corrected (it persists even with genotype
     likelihoods, doi:10.1101/2024.07.01.601500); documented as a caveat.
 

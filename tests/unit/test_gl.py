@@ -148,6 +148,26 @@ class TestReadBeagleGL:
         b = read_beagle_gl(p)
         assert b.marker_ids == ["100", "200"]
 
+    def test_duplicate_markers_rejected(self, tmp_path: Path) -> None:
+        # Duplicate marker IDs would silently collapse to the last row in the
+        # alignment dict; reject them (the hard-call path gets this from plink2).
+        p = _write_beagle(
+            tmp_path / "dup.beagle", ["rs1", "rs1"], ["A", "A"], ["G", "G"],
+            np.array([[0.9, 0.05, 0.05], [0.1, 0.1, 0.8]]),
+        )
+        with pytest.raises(PanelCacheError, match="duplicate marker"):
+            read_beagle_gl(p)
+
+    def test_na_token_marker_preserved(self, tmp_path: Path) -> None:
+        # keep_default_na=False: an NA-token marker must stay verbatim, not be
+        # turned into the float NaN that str() renders as "nan".
+        p = _write_beagle(
+            tmp_path / "na.beagle", ["NA", "rs2"], ["A", "A"], ["G", "G"],
+            np.array([[0.9, 0.08, 0.02], [0.1, 0.2, 0.7]]),
+        )
+        b = read_beagle_gl(p)
+        assert b.marker_ids == ["NA", "rs2"]
+
 
 # ─── align_gl_to_panel ───────────────────────────────────────────────────
 
@@ -218,6 +238,19 @@ class TestAlignGLToPanel:
         beagle = BeagleGL(["other"], ["G"], ["A"], np.array([[0.7, 0.2, 0.1]]))
         with pytest.raises(PanelCacheError, match="no panel SNP"):
             align_gl_to_panel(beagle=beagle, panel_bim=bim)
+
+    def test_flat_triple_dropped_as_uninformative(self, tmp_path: Path) -> None:
+        # ANGSD writes no-coverage sites as a flat (1/3,1/3,1/3) triple; these
+        # carry no information and must be NaN'd (not counted), like missing.
+        bim = self._panel(tmp_path, [("A", "G"), ("A", "G")])
+        third = 1.0 / 3.0
+        beagle = BeagleGL(
+            ["rs0", "rs1"], ["G", "G"], ["A", "A"],
+            np.array([[third, third, third], [0.8, 0.15, 0.05]]),
+        )
+        out = align_gl_to_panel(beagle=beagle, panel_bim=bim)
+        assert np.isnan(out[0]).all()       # flat -> dropped
+        assert not np.isnan(out[1]).any()   # informative -> placed
 
 
 # ─── numpy_supervised_projection_gl ──────────────────────────────────────
@@ -313,6 +346,14 @@ class TestGLProjectionMath:
         assert converged
         assert np.max(np.abs(q - q_true)) < 0.10
 
+    def test_all_flat_triples_raise(self) -> None:
+        """If every usable site is a flat (1/3,1/3,1/3) triple there is nothing
+        to fit; raise rather than silently return the uniform start."""
+        p = np.column_stack([np.full(100, 0.9), np.full(100, 0.1)])
+        gl = np.full((100, 3), 1.0 / 3.0)
+        with pytest.raises(PanelCacheError, match="uninformative"):
+            numpy_supervised_projection_gl(gl=gl, p_matrix=p, k=2)
+
 
 # ─── project_target_gl (end to end, no binaries) ─────────────────────────
 
@@ -338,4 +379,30 @@ class TestProjectTargetGLEndToEnd:
         assert result.converged
         assert result.n_snps_used == m
         assert np.isnan(result.heterozygosity)  # no hard genotypes in GL mode
+        assert np.max(np.abs(result.target_q - q_true)) < 0.10
+
+    def test_flat_sites_excluded_from_count_and_solve(self, tmp_path: Path) -> None:
+        """A target where some sites are ANGSD no-coverage flat triples: those
+        must NOT be counted in n_snps_used (the reported information content) and
+        must not perturb Q. Guards against the n_snps_used overcount that an
+        all-informative fixture cannot catch."""
+        rng = np.random.default_rng(8)
+        m, k = 3000, 3
+        n_flat = 900
+        p = rng.uniform(0.05, 0.95, size=(m, k))
+        q_true = rng.dirichlet(np.ones(k))
+        markers = [f"rs{i}" for i in range(m)]
+        g = rng.binomial(2, p @ q_true)
+        gl = np.zeros((m, 3))
+        gl[np.arange(m), g] = 1.0
+        gl[:n_flat] = 1.0 / 3.0  # no-coverage flat triples
+        beagle = _write_beagle(
+            tmp_path / "t.beagle", markers, ["G"] * m, ["A"] * m, gl,
+        )
+        cache = _write_gl_cache(tmp_path, p, markers)
+
+        result = project_target_gl(target_gl_beagle=beagle, cache_dir=cache)
+        assert result.converged
+        # Only the informative sites count, not the flat no-coverage ones.
+        assert result.n_snps_used == m - n_flat
         assert np.max(np.abs(result.target_q - q_true)) < 0.10

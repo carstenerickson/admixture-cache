@@ -20,6 +20,10 @@ from scipy.optimize import minimize
 
 from admixture_cache.errors import PanelCacheError
 
+# A normalized GL triple with max-min at/below this is treated as flat
+# (uninformative): g0==g1==g2 makes the per-site likelihood constant in f.
+_GL_INFORMATIVE_TOL = 1e-9
+
 
 @dataclass(frozen=True)
 class ProjectionResult:
@@ -175,6 +179,23 @@ def numpy_supervised_projection_gl(
         )
     gl_obs = gl[mask] / row_sums[mask][:, None]
     P_obs = p_matrix[mask]
+
+    # Drop flat triples (g0==g1==g2): their per-site likelihood is constant in f
+    # (zero gradient), so they carry no information and would inflate the
+    # mean-NLL denominator. If ALL usable rows are flat (e.g. an all-no-coverage
+    # target), there is nothing to fit and the solver would otherwise sit at the
+    # uniform start reporting converged=True, so raise instead. (align_gl_to_panel
+    # already drops these for the normal path; this guards direct callers.)
+    informative = (
+        gl_obs.max(axis=1) - gl_obs.min(axis=1)
+    ) > _GL_INFORMATIVE_TOL
+    if not informative.any():
+        raise PanelCacheError(
+            "numpy_supervised_projection_gl: all usable GL sites are "
+            "uninformative (flat genotype-likelihood triples); cannot project.",
+        )
+    gl_obs = gl_obs[informative]
+    P_obs = P_obs[informative]
 
     g0 = gl_obs[:, 0]
     g1 = gl_obs[:, 1]

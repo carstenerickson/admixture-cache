@@ -20,9 +20,12 @@ target individual::
 ``allele1`` is the major allele, ``allele2`` the minor; the three per-individual
 columns are the genotype likelihoods of (allele1/allele1, allele1/allele2,
 allele2/allele2), i.e. indexed by the count of ``allele2``. Alleles may be given as
-letters (A/C/G/T) or ANGSD numeric codes (0=A, 1=C, 2=G, 3=T). Per-site
-normalization is irrelevant: a per-site constant factors out of the product over
-sites and cannot move the argmax over Q.
+letters (A/C/G/T) or ANGSD numeric codes (0=A, 1=C, 2=G, 3=T). GLs must be
+non-negative (linear probabilities, not log/phred values). Per-site scale does
+not matter: the solver normalizes each site's GL triple to sum to 1, so absolute
+GL magnitude cannot affect the estimate (a per-site constant cancels in the
+argmax over Q; normalizing also keeps tiny-magnitude raw GLs off the solver's
+numerical floor).
 
 ``marker`` must match the cached ``panel.bim`` variant IDs; alignment to the panel
 (variant matching, REF/ALT orientation to the panel's allele-1 axis, strand-ambiguous
@@ -81,7 +84,11 @@ def read_beagle_gl(path: Path) -> BeagleGL:
 
     import pandas as pd
 
-    df = pd.read_csv(path, sep="\t")
+    # Read everything as strings: the marker/allele columns must stay verbatim
+    # (a numeric marker like "100" must not be inferred as float and become
+    # "100.0", which would never match panel.bim's "100"), and the GL columns
+    # are converted to float explicitly below.
+    df = pd.read_csv(path, sep="\t", dtype=str)
     if df.shape[1] != 6:
         raise PanelCacheError(
             f"read_beagle_gl: expected 6 columns (marker, allele1, allele2, and "
@@ -104,6 +111,12 @@ def read_beagle_gl(path: Path) -> BeagleGL:
     if not np.all(np.isfinite(gl)):
         raise PanelCacheError(
             f"read_beagle_gl: {path} contains non-finite genotype likelihoods",
+        )
+    if np.any(gl < 0):
+        raise PanelCacheError(
+            f"read_beagle_gl: {path} contains negative genotype likelihoods. "
+            f"This path expects linear-probability beagle GLs (non-negative); "
+            f"log- or phred-scaled likelihoods are not supported.",
         )
     return BeagleGL(
         marker_ids=marker_ids, allele1=allele1, allele2=allele2, gl=gl,
@@ -135,9 +148,13 @@ def _orient_gl_to_panel_a1(
     returns None when the alleles are incompatible (different SNP, indel, etc.).
     """
     pa1, pa2 = panel_a1.upper(), panel_a2.upper()
-    for a1, a2, _flipped in (
-        (b_a1, b_a2, False),
-        (_COMPLEMENT.get(b_a1), _COMPLEMENT.get(b_a2), True),
+    # Try the beagle alleles as given, then under strand complement. (Callers
+    # pass decoded A/C/G/T, so _COMPLEMENT.get never returns None in practice;
+    # the None check stays as cheap defense if this is ever reused with raw
+    # alleles.)
+    for a1, a2 in (
+        (b_a1, b_a2),
+        (_COMPLEMENT.get(b_a1), _COMPLEMENT.get(b_a2)),
     ):
         if a1 is None or a2 is None:
             continue

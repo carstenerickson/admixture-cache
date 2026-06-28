@@ -92,6 +92,30 @@ class TestProjectGLCli:
         rc = main(["project", "--target-bed", "t", "--cache-dir", "c"])
         assert rc == 2
 
+    def test_gl_route_human_output_shows_na_not_nan(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # GL path heterozygosity is NaN; human output must not print "nan".
+        monkeypatch.setattr(
+            cli_mod, "project_target_gl", lambda **kw: _fake_result(),
+        )
+        main(["project", "--gl-beagle", "t.beagle", "--cache-dir", "c"])
+        out = capsys.readouterr().out
+        assert "n/a" in out
+        assert "Heterozygosity: nan" not in out
+
+    def test_gl_route_warns_when_workdir_passed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            cli_mod, "project_target_gl", lambda **kw: _fake_result(),
+        )
+        main([
+            "project", "--gl-beagle", "t.beagle", "--cache-dir", "c",
+            "--work-dir", "w",
+        ])
+        assert "work-dir is ignored" in capsys.readouterr().err
+
 
 class TestParser:
     def test_version_flag(self, capsys: pytest.CaptureFixture[str]) -> None:

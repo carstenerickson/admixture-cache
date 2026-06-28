@@ -163,6 +163,12 @@ def _cmd_project(ns: argparse.Namespace) -> int:
     if ns.gl_beagle is not None:
         # Genotype-likelihood path: no plink2, no work-dir (alignment is by
         # variant ID in pure Python).
+        if ns.work_dir is not None:
+            print(
+                "warning: --work-dir is ignored with --gl-beagle (the "
+                "genotype-likelihood path writes no intermediates)",
+                file=sys.stderr,
+            )
         result = project_target_gl(
             target_gl_beagle=ns.gl_beagle,
             cache_dir=ns.cache_dir,
@@ -202,7 +208,10 @@ def _cmd_project(ns: argparse.Namespace) -> int:
     else:
         print(f"Converged: {result.converged}  iters: {result.optimization_iterations}")
         print(f"Non-missing SNPs used: {result.n_snps_used}")
-        print(f"Heterozygosity: {result.heterozygosity:.4f}")
+        if math.isnan(result.heterozygosity):
+            print("Heterozygosity: n/a (genotype-likelihood path)")
+        else:
+            print(f"Heterozygosity: {result.heterozygosity:.4f}")
         print(f"Panel stability max SD: {result.panel_stability_max_sd:.4f}")
         print("Q vector:")
         width = max(len(c) for c in result.cluster_order)

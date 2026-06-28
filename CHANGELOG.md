@@ -26,7 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     No plink2 is needed for the GL path; alignment is pure Python.
   - New solver `numpy_supervised_projection_gl`. Verified that a point-mass GL
     reproduces the hard-call estimate exactly (the marginal reduces to the
-    binomial pmf), and the analytic gradient matches finite differences.
+    binomial pmf), and the analytic gradient matches finite differences. The
+    solver normalizes each site's GL triple to sum to 1, so absolute GL
+    magnitude cannot affect the estimate (the per-site numerical floor is not
+    scale-invariant on its own); rows that are missing or carry no information
+    are masked. `read_beagle_gl` reads marker/allele columns verbatim (no float
+    coercion of numeric IDs) and rejects negative GLs (log/phred-scaled input).
   - Mapping / reference bias is not corrected (it persists even with genotype
     likelihoods, doi:10.1101/2024.07.01.601500); documented as a caveat.
 

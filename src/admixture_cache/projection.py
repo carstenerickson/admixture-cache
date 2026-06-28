@@ -12,6 +12,7 @@ plink2-based target alignment + dosage load).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -132,11 +133,14 @@ def numpy_supervised_projection_gl(
     """Genotype-likelihood supervised-ADMIXTURE projection (NGSadmix model).
 
     Given per-SNP genotype likelihoods ``gl`` (M × 3, columns = P(reads |
-    genotype = 0/1/2 copies of allele 1); rows of NaN are treated as missing)
-    and a fixed allele-frequency matrix ``p_matrix`` (M × K, P[s,k] = freq of
-    allele 1 in pop k), solve for the target's K-vector admixture proportions q
-    by maximum likelihood. Per SNP the unknown genotype is marginalized out
-    under a Hardy-Weinberg prior at the admixed frequency f_s = q^T P_s:
+    genotype = 0/1/2 copies of allele 1)) and a fixed allele-frequency matrix
+    ``p_matrix`` (M × K, P[s,k] = freq of allele 1 in pop k), solve for the
+    target's K-vector admixture proportions q by maximum likelihood. Rows that
+    are NaN (missing) or carry no information (GL sum <= 0) are masked out; each
+    remaining site's GL triple is normalized to sum to 1 so absolute GL
+    magnitude cannot affect the estimate. Per SNP the unknown genotype is
+    marginalized out under a Hardy-Weinberg prior at the admixed frequency
+    f_s = q^T P_s:
 
         L_s(q) = GL_s(0)·(1-f)^2 + GL_s(1)·2f(1-f) + GL_s(2)·f^2
 
@@ -155,14 +159,22 @@ def numpy_supervised_projection_gl(
         f"P has {p_matrix.shape[1]} columns but k={k}"
     )
 
-    mask = ~np.isnan(gl).any(axis=1)
-    gl_obs = gl[mask]
-    P_obs = p_matrix[mask]
-    if gl_obs.shape[0] == 0:
+    # Usable sites are finite AND carry information (a positive GL sum). Rows
+    # that are NaN (missing) or all-zero are masked out. Each usable row is then
+    # normalized to sum to 1 so the absolute GL magnitude cannot affect the
+    # estimate: the per-site eps clip below is NOT scale-invariant, so tiny raw
+    # GLs would otherwise be floored to a flat objective and the solver would
+    # never leave the uniform start (a pure rescaling would change Q).
+    finite = ~np.isnan(gl).any(axis=1)
+    row_sums = np.where(finite, gl.sum(axis=1), np.nan)
+    mask = finite & (row_sums > 0)
+    if not mask.any():
         raise PanelCacheError(
             "numpy_supervised_projection_gl: target has zero usable GL sites "
-            "after masking; cannot project (no data).",
+            "after masking (all missing or zero-information); cannot project.",
         )
+    gl_obs = gl[mask] / row_sums[mask][:, None]
+    P_obs = p_matrix[mask]
 
     g0 = gl_obs[:, 0]
     g1 = gl_obs[:, 1]
@@ -189,8 +201,9 @@ def numpy_supervised_projection_gl(
 
 
 def _minimize_on_simplex(
-    neg_log_lik: object, grad_neg_log_lik: object, k: int,
-    maxiter: int, ftol: float,
+    neg_log_lik: Callable[[np.ndarray], float],
+    grad_neg_log_lik: Callable[[np.ndarray], np.ndarray],
+    k: int, maxiter: int, ftol: float,
 ) -> tuple[np.ndarray, int, bool]:
     """Minimize ``neg_log_lik`` over the probability simplex (sum(q)=1,
     0<=q_k<=1) from the uniform start via SLSQP. Shared by the hard-call and

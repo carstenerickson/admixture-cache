@@ -127,6 +127,27 @@ class TestReadBeagleGL:
         with pytest.raises(PanelCacheError, match="no data"):
             read_beagle_gl(path)
 
+    def test_negative_gl_rejected(self, tmp_path: Path) -> None:
+        # Negative values mean log/phred-scaled GLs, which this path does not
+        # support (it expects linear probabilities).
+        path = tmp_path / "neg.beagle"
+        path.write_text(
+            "marker\tallele1\tallele2\tInd0\tInd0\tInd0\n"
+            "rs1\tA\tG\t-0.1\t0.5\t0.6\n",
+        )
+        with pytest.raises(PanelCacheError, match="negative"):
+            read_beagle_gl(path)
+
+    def test_numeric_markers_preserved_as_strings(self, tmp_path: Path) -> None:
+        # Numeric markers must stay verbatim ("100", not float-coerced "100.0"),
+        # else they would never match panel.bim variant IDs.
+        p = _write_beagle(
+            tmp_path / "num.beagle", ["100", "200"], ["A", "A"], ["G", "G"],
+            np.array([[0.9, 0.08, 0.02], [0.1, 0.2, 0.7]]),
+        )
+        b = read_beagle_gl(p)
+        assert b.marker_ids == ["100", "200"]
+
 
 # ─── align_gl_to_panel ───────────────────────────────────────────────────
 
@@ -256,6 +277,41 @@ class TestGLProjectionMath:
         gl = np.zeros((99, 3))
         with pytest.raises(AssertionError):
             numpy_supervised_projection_gl(gl=gl, p_matrix=p, k=2)
+
+    def test_unnormalized_gl_scale_invariant(self) -> None:
+        """The solver normalizes each site, so a pure rescaling of all GLs must
+        give the same Q. Regression for the eps-clip scale bug: at a tiny scale
+        the pre-fix code floored every site and returned the uniform start."""
+        rng = np.random.default_rng(11)
+        m, k = 2000, 3
+        p = rng.uniform(0.05, 0.95, size=(m, k))
+        q_true = rng.dirichlet(np.ones(k))
+        g = rng.binomial(2, p @ q_true)
+        gl = np.full((m, 3), 0.1)
+        gl[np.arange(m), g] = 0.8
+        q_ref, _, _ = numpy_supervised_projection_gl(gl=gl, p_matrix=p, k=k)
+        q_tiny, _, conv = numpy_supervised_projection_gl(
+            gl=gl * 1e-11, p_matrix=p, k=k,
+        )
+        assert conv
+        np.testing.assert_allclose(q_tiny, q_ref, atol=1e-6)
+        # And it is not just pinned at the uniform start.
+        assert np.max(np.abs(q_tiny - np.full(k, 1 / k))) > 0.05
+
+    def test_zero_information_rows_masked(self) -> None:
+        """All-zero GL rows carry no information and must be masked out (not
+        floored to a flat term), leaving the informative sites to recover Q."""
+        rng = np.random.default_rng(12)
+        m, k = 2000, 2
+        p = rng.uniform(0.05, 0.95, size=(m, k))
+        q_true = rng.dirichlet(np.ones(k))
+        g = rng.binomial(2, p @ q_true)
+        gl = np.zeros((m, 3))
+        gl[np.arange(m), g] = 1.0
+        gl[:400] = 0.0  # zero-information rows
+        q, _, converged = numpy_supervised_projection_gl(gl=gl, p_matrix=p, k=k)
+        assert converged
+        assert np.max(np.abs(q - q_true)) < 0.10
 
 
 # ─── project_target_gl (end to end, no binaries) ─────────────────────────

@@ -44,6 +44,7 @@ from admixture_cache import (
     build_panel_cache,
     extract_target_dosage_via_plink2,
     project_target,
+    sha256_file,
 )
 
 # All tests in this module require the `integration` marker.
@@ -162,7 +163,26 @@ class TestBuildPanelCache:
         assert (cache_dir / "panel.bim").is_file()
         assert (cache_dir / "restart_sd.json").is_file()
         assert (cache_dir / "cluster_order.json").is_file()
+        # gh #719: panel.pop is part of the cache contract — the runtime
+        # validator rejects a cache that lacks it and falls back to full
+        # ADMIXTURE. It was missing from this assertion list, which is how
+        # the bug shipped.
+        assert (cache_dir / "panel.pop").is_file()
         assert (cache_dir / "build_logs").is_dir()
+
+    def test_panel_pop_copied_and_sha_matches_manifest(
+        self, cache_dir: Path
+    ) -> None:
+        """gh #719: the copied panel.pop must be byte-identical to the source
+        supervised-label file and its sha must equal the manifest's
+        panel_pop_sha256 — the exact guard the runtime validator
+        (verify_cache_matches_current_config) applies at projection time.
+        Without this, a freshly built cache is rejected as stale."""
+        cached_pop = cache_dir / "panel.pop"
+        assert cached_pop.is_file()
+        assert cached_pop.read_bytes() == (FIXTURES / "panel.pop").read_bytes()
+        manifest = json.loads((cache_dir / "manifest.json").read_text())
+        assert manifest["panel_pop_sha256"] == sha256_file(cached_pop)
 
     def test_cached_p_shape_matches_panel(self, cache_dir: Path) -> None:
         """Cached P is (M_snps, K) — 2000 × 3 for our fixture."""

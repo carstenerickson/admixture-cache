@@ -670,6 +670,13 @@ def build_panel_cache(
     shutil.copy2(best["q_path"], best_q_dest)
     # Also copy panel.bim for projection-time variant alignment
     shutil.copy2(panel_bim_path, cache_dir / "panel.bim")
+    # Also copy panel.pop (the supervised-label file). The runtime cache
+    # validator requires panel.pop in the cache dir AND checks its sha against
+    # the manifest's panel_pop_sha256; without the file the cache is rejected
+    # as stale and the run falls back to full ADMIXTURE. Its sha is already
+    # recorded in the manifest below (panel_pop_sha), so the copied file is
+    # the same bytes the manifest attests. (gh #719)
+    shutil.copy2(panel_pop_file, cache_dir / "panel.pop")
 
     # Write restart_sd.json (per-cluster max SD across non-anchor samples)
     restart_sd_per_cluster = {

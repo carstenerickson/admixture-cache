@@ -189,6 +189,62 @@ class TestBuildPanelCacheIdempotency:
         assert result.best_seed == 1
         assert result.k == 2
 
+    def test_skip_rebuild_backfills_missing_panel_pop(
+        self, tmp_path: Path,
+    ) -> None:
+        """gh #719: a cache that matches config but lacks panel.pop on disk
+        (built by <= 1.5.1) is self-healed in place. build_panel_cache copies
+        panel.pop in WITHOUT re-running ADMIXTURE, so the runtime validator
+        stops rejecting the cache as stale. Mirrors
+        test_skip_rebuild_when_manifest_matches with panel.pop absent."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=5)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        manifest = PanelCacheManifest(
+            track="regional",
+            panel_id="p1", panel_version="v1",
+            panel_bim_sha256=sha256_file(panel_bed.with_suffix(".bim")),
+            clusters_yaml_sha256=sha256_file(yaml),
+            panel_pop_sha256=sha256_file(pop),
+            k=2,
+            admixture_version="1.4.0",
+            seeds_used=[1, 2],
+            best_seed=1,
+            best_loglikelihood=-1.0,
+            restart_sd_max=0.0,
+            cluster_order=["A", "B"],
+            build_wallclock_seconds=1.0,
+            build_timestamp=datetime.now(UTC),
+        )
+        (cache_dir / "manifest.json").write_text(manifest.model_dump_json())
+        # panel.pop deliberately absent from the cache dir (the <= 1.5.1 bug).
+        assert not (cache_dir / "panel.pop").exists()
+
+        runner = _FakeAdmixtureRunner(k=2, n_samples=4, n_snps=5)
+        build_panel_cache(
+            panel_bed=panel_bed,
+            panel_pop_file=pop,
+            clusters_yaml=yaml,
+            k=2,
+            cache_dir=cache_dir,
+            admixture_runner=runner,
+            track="regional",
+            panel_id="p1",
+            panel_version="v1",
+            admixture_version="1.4.0",
+            seeds=[1, 2],
+            sd_threshold=0.02,
+        )
+        # No rebuild happened (the expensive ADMIXTURE pass was skipped) ...
+        assert runner.calls == []
+        # ... but panel.pop is now present and byte-identical to the source.
+        cached_pop = cache_dir / "panel.pop"
+        assert cached_pop.is_file()
+        assert cached_pop.read_bytes() == pop.read_bytes()
+
     def test_rebuild_when_panel_bim_sha_changed(self, tmp_path: Path) -> None:
         """Stale cache (different panel_bim_sha) → rebuild."""
         panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=5)

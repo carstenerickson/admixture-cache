@@ -297,6 +297,28 @@ def build_panel_cache(
             expected_panel_pop_sha256=panel_pop_sha,
         )
         if matched:
+            # Self-heal a cache that matches config but is missing panel.pop
+            # in the cache dir (gh #719). Caches built by any release before
+            # 1.6.0 (before panel.pop was copied into the cache dir) have a
+            # valid manifest but no panel.pop on disk, so the runtime
+            # validator rejects them and this no-op would otherwise leave
+            # them broken forever. panel.pop
+            # is a verbatim copy of panel_pop_file, whose sha the manifest
+            # already attests (a matching non-null panel_pop_sha256 means the
+            # bytes are identical; a legacy null sha is not pinned), so the
+            # backfill is safe and needs no ADMIXTURE rebuild. Only panel.pop
+            # is reconstructable this way: the P/Q/bim/restart_sd outputs are
+            # build products, so this does not widen the existing
+            # manifest-match short-circuit beyond the one input-derived file.
+            cached_pop = cache_dir / "panel.pop"
+            if not cached_pop.exists():
+                shutil.copy2(panel_pop_file, cached_pop)
+                logger.info(
+                    "build_panel_cache: backfilled missing panel.pop into %s "
+                    "(cache matched config but predated the in-cache "
+                    "panel.pop).",
+                    cache_dir,
+                )
             logger.info(
                 "build_panel_cache: cache at %s matches current config; "
                 "skipping rebuild (no-op).",
@@ -670,6 +692,13 @@ def build_panel_cache(
     shutil.copy2(best["q_path"], best_q_dest)
     # Also copy panel.bim for projection-time variant alignment
     shutil.copy2(panel_bim_path, cache_dir / "panel.bim")
+    # Also copy panel.pop (the supervised-label file). The runtime cache
+    # validator requires panel.pop in the cache dir AND checks its sha against
+    # the manifest's panel_pop_sha256; without the file the cache is rejected
+    # as stale and the run falls back to full ADMIXTURE. Its sha is already
+    # recorded in the manifest below (panel_pop_sha), so the copied file is
+    # the same bytes the manifest attests. (gh #719)
+    shutil.copy2(panel_pop_file, cache_dir / "panel.pop")
 
     # Write restart_sd.json (per-cluster max SD across non-anchor samples)
     restart_sd_per_cluster = {

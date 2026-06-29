@@ -227,6 +227,20 @@ def build_panel_cache(
       buy multimodality detection, which requires unlabeled samples /
       free Q to be meaningful.)
 
+    Free-Q panels (unlabeled '-' rows in panel_pop_file)
+    ----------------------------------------------------
+    When some samples are unlabeled their Q is free and the likelihood is
+    multimodal, so the restart count matters. Published practice runs at
+    least 10 replicates (more at higher K), with cross-replicate mode
+    analysis (Skoglund et al. 2012; pong, Behr et al. 2016); the default
+    of 5 is on the low end (SCIENCE.md D4). The default is kept at 5, but
+    for a free-Q panel built below 10 restarts the build logs an advisory
+    warning recommending more seeds (e.g. ``seeds=list(range(1, 11))``).
+    Per-seed loglikelihoods and their best-minus-worst spread are recorded
+    in ``restart_sd.json`` (and a compact ``loglikelihood_spread`` on the
+    manifest) so multimodality is visible post-hoc; the per-cell Q SD gate
+    still fails a build on cross-restart disagreement.
+
     Parameters of note
     ------------------
     threads
@@ -646,6 +660,23 @@ def build_panel_cache(
         best["seed"], best_ll,
     )
 
+    # Per-seed loglikelihoods + spread, recorded for multimodality
+    # transparency (SCIENCE.md D4). The spread (best minus worst over the
+    # parseable restarts) is ~0 when every restart reached the same
+    # optimum and large when they did not; it complements the per-cell Q
+    # SD gate below (which catches cross-restart disagreement) by making
+    # the raw loglikelihood landscape visible post-hoc. None when fewer
+    # than two restarts produced a parseable loglikelihood.
+    per_seed_loglikelihood: dict[int, float | None] = {
+        r["seed"]: r["ll"] for r in per_restart_results
+    }
+    parseable_lls = [cast(float, r["ll"]) for r in with_ll]
+    loglikelihood_spread: float | None = (
+        max(parseable_lls) - min(parseable_lls)
+        if len(parseable_lls) >= 2
+        else None
+    )
+
     # Compute multimodality SD across restarts on the Q matrices.
     # SD per (cluster, sample) over the restarts, then take the max.
     q_matrices = [np.loadtxt(r["q_path"]) for r in per_restart_results]
@@ -685,6 +716,31 @@ def build_panel_cache(
         expected_k=k,
     )
 
+    # Free-Q advisory (SCIENCE.md D4). A panel with unlabeled ('-') rows
+    # has free Q and a multimodal likelihood, so the random-restart count
+    # matters; a fully-labeled panel is deterministic (D15) and any count
+    # is fine. We keep the default of 5 but warn when a free-Q panel was
+    # built below the recommended floor, so an under-replicated free-Q
+    # cache is not silently accepted. Advisory only: the cache is still
+    # written (cf. the per-cell Q SD gate above, which DOES fail a build
+    # on cross-restart disagreement).
+    n_unlabeled = _count_unlabeled_pop_rows(panel_pop_file)
+    panel_has_free_q = n_unlabeled > 0
+    if panel_has_free_q and len(seeds) < _RECOMMENDED_FREE_Q_RESTARTS:
+        logger.warning(
+            "build_panel_cache: panel has %d unlabeled ('-') row(s) so Q "
+            "is free and the likelihood is multimodal, but only %d "
+            "restart(s) were run. Published ADMIXTURE practice is >=%d "
+            "replicates for free-Q panels (Skoglund et al. 2012; Behr et "
+            "al. 2016 pong), more at higher K; 5 can under-sample the "
+            "optimum. Pass more seeds (e.g. seeds=list(range(1, 11))) for "
+            "a multimodality-robust cache. Per-seed loglikelihoods and "
+            "their spread are recorded in restart_sd.json (loglikelihood_"
+            "spread=%s).",
+            n_unlabeled, len(seeds), _RECOMMENDED_FREE_Q_RESTARTS,
+            loglikelihood_spread,
+        )
+
     # Copy best restart's outputs to the canonical cache locations
     best_p_dest = cache_dir / f"panel.{k}.P"
     best_q_dest = cache_dir / f"panel.{k}.Q"
@@ -711,6 +767,16 @@ def build_panel_cache(
             "overall_max_sd": restart_sd_max,
             "threshold": sd_threshold,
             "n_restarts": len(per_restart_results),
+            # Per-seed final loglikelihoods (null = no parseable LL for
+            # that restart) and their best-minus-worst spread, plus
+            # whether the panel had free Q. Multimodality diagnostics
+            # (SCIENCE.md D4); JSON object keys are strings.
+            "per_seed_loglikelihood": {
+                str(seed): ll for seed, ll in per_seed_loglikelihood.items()
+            },
+            "best_seed": best["seed"],
+            "loglikelihood_spread": loglikelihood_spread,
+            "panel_has_free_q": panel_has_free_q,
         }, indent=2)
     )
     (cache_dir / "cluster_order.json").write_text(
@@ -738,6 +804,7 @@ def build_panel_cache(
         best_seed=best["seed"],
         best_loglikelihood=best_ll,
         restart_sd_max=restart_sd_max,
+        loglikelihood_spread=loglikelihood_spread,
         cluster_order=cluster_order,
         geo_filter_yaml_shas=geo_shas,
         pgen_samplebind_version=pgen_samplebind_version,
@@ -960,6 +1027,38 @@ def _parse_admixture_loglikelihood(log_text: str) -> float | None:
         return float(matches[-1])
     except ValueError:
         return None
+
+
+def _count_unlabeled_pop_rows(panel_pop_file: Path) -> int:
+    """Count unlabeled ('-') rows in a supervised .pop file.
+
+    A '-' row is an individual whose Q is free (estimated by ADMIXTURE),
+    as opposed to a labeled row pinned to a single cluster. A panel with
+    zero unlabeled rows is fully supervised: ADMIXTURE has no free Q, the
+    P/Q solution is determined by the labels, and restarts are
+    byte-identical regardless of seed (SCIENCE.md D15). When there ARE
+    unlabeled rows the likelihood is multimodal and the random restart
+    count starts to matter (SCIENCE.md D4).
+    """
+    n = 0
+    with panel_pop_file.open() as f:
+        for line in f:
+            if line.strip() == "-":
+                n += 1
+    return n
+
+
+# Recommended minimum random restarts for a panel with unlabeled ('-')
+# rows (free Q). The default of 5 is harmless for a fully-labeled panel
+# (restarts are deterministic, D15) but is on the low end of published
+# practice once Q is free: ADMIXTURE/STRUCTURE analyses commonly run >=10
+# replicates with cross-replicate mode analysis (Skoglund et al. 2012,
+# doi:10.1126/science.1216304; Behr et al. 2016 pong,
+# doi:10.1093/bioinformatics/btw327), rising to 50-100 when formal
+# multimodality detection is the goal (e.g. Lipson et al. Vietnam 2020,
+# doi:10.1093/molbev/msaa099). We keep the default at 5 and only warn
+# below this floor (SCIENCE.md D4); the build never silently runs more.
+_RECOMMENDED_FREE_Q_RESTARTS = 10
 
 
 def _derive_cluster_order_from_pop_file(

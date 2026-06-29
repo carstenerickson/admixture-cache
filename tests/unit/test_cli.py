@@ -134,6 +134,31 @@ class TestProjectGLCli:
         ])
         assert captured["min_overlap_snps"] == 500
 
+    def test_min_overlap_snps_threaded_on_target_bed_route(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_pt(**kwargs: object) -> ProjectionResult:
+            captured.update(kwargs)
+            return _fake_result()
+
+        monkeypatch.setattr(cli_mod, "project_target", fake_pt)
+        # avoid spawning a real plink2 runner path issue: project_target is stubbed
+        main([
+            "project", "--target-bed", "t", "--cache-dir", "c", "--work-dir", "w",
+            "--min-overlap-snps", "7",
+        ])
+        assert captured["min_overlap_snps"] == 7
+
+    def test_negative_min_overlap_snps_rejected(self) -> None:
+        # A fat-fingered negative must error, not silently disable the floor.
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args([
+                "project", "--gl-beagle", "g", "--cache-dir", "c",
+                "--min-overlap-snps", "-1",
+            ])
+
 
 class TestParser:
     def test_version_flag(self, capsys: pytest.CaptureFixture[str]) -> None:

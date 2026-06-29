@@ -424,5 +424,5 @@ class TestProjectTargetGLEndToEnd:
             tmp_path / "t.beagle", markers, ["G"] * m, ["A"] * m, gl,
         )
         cache = _write_gl_cache(tmp_path, p, markers)
-        with pytest.raises(PanelCacheError, match="below the minimum"):
+        with pytest.raises(PanelCacheError, match="below the configured minimum"):
             project_target_gl(target_gl_beagle=beagle, cache_dir=cache)

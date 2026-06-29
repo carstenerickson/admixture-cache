@@ -186,25 +186,29 @@ class TestLowHeterozygosityWarning:
             _warn_on_low_heterozygosity(het_rate, n_obs)
 
 
+def _stub_project_pipeline(
+    monkeypatch: pytest.MonkeyPatch, dosage: np.ndarray, p: np.ndarray,
+) -> None:
+    """Stub project_target's plink2 steps so it runs without binaries: align +
+    dosage extraction + reindex return the given dosage, and load_cached_p
+    returns the given P. The real SLSQP solve still runs on (dosage, P)."""
+    monkeypatch.setattr(
+        orch, "align_target_to_panel_bim", lambda **kw: Path("aligned.bed"),
+    )
+    monkeypatch.setattr(
+        orch, "extract_target_dosage_via_plink2", lambda **kw: dosage,
+    )
+    monkeypatch.setattr(
+        orch, "reindex_dosage_to_panel_order", lambda **kw: dosage,
+    )
+    monkeypatch.setattr(orch, "load_cached_p", lambda cache_dir, k: p)
+
+
 class TestProjectTargetHeterozygosity:
     """D17: project_target computes the target's heterozygosity, surfaces it
     on ProjectionResult, and warns on essentially-zero het. The plink2 steps
     are stubbed so this runs without binaries; the real SLSQP solve runs on a
     small synthetic P + dosage."""
-
-    def _stub_pipeline(
-        self, monkeypatch: pytest.MonkeyPatch, dosage: np.ndarray, p: np.ndarray,
-    ) -> None:
-        monkeypatch.setattr(
-            orch, "align_target_to_panel_bim", lambda **kw: Path("aligned.bed"),
-        )
-        monkeypatch.setattr(
-            orch, "extract_target_dosage_via_plink2", lambda **kw: dosage,
-        )
-        monkeypatch.setattr(
-            orch, "reindex_dosage_to_panel_order", lambda **kw: dosage,
-        )
-        monkeypatch.setattr(orch, "load_cached_p", lambda cache_dir, k: p)
 
     def test_pseudohaploid_warns_and_reports_zero_het(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -216,7 +220,7 @@ class TestProjectTargetHeterozygosity:
         # Pseudo-haploid: sample ONE allele per site -> dosage in {0, 2} only.
         dosage = 2.0 * (rng.random(m) < h).astype(np.float64)
         cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
-        self._stub_pipeline(monkeypatch, dosage, p)
+        _stub_project_pipeline(monkeypatch, dosage, p)
 
         with pytest.warns(UserWarning, match="heterozygosity"):
             result = project_target(
@@ -237,7 +241,7 @@ class TestProjectTargetHeterozygosity:
         h = p @ np.array([0.5, 0.5])
         dosage = rng.binomial(2, h).astype(np.float64)  # diploid: has 1s
         cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
-        self._stub_pipeline(monkeypatch, dosage, p)
+        _stub_project_pipeline(monkeypatch, dosage, p)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -258,7 +262,7 @@ class TestMinOverlapFloor:
     a meaningful Q. The helper holds the policy; project_target enforces it."""
 
     def test_helper_raises_below(self) -> None:
-        with pytest.raises(PanelCacheError, match="below the minimum"):
+        with pytest.raises(PanelCacheError, match="below the configured minimum"):
             _check_min_overlap(400, 10_000)
 
     def test_helper_ok_at_or_above(self) -> None:
@@ -277,11 +281,33 @@ class TestMinOverlapFloor:
         p = np.column_stack([np.full(m, 0.8), np.full(m, 0.2)])
         dosage = rng.binomial(2, p @ np.array([0.5, 0.5])).astype(np.float64)
         cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
-        TestProjectTargetHeterozygosity()._stub_pipeline(monkeypatch, dosage, p)
-        with pytest.raises(PanelCacheError, match="below the minimum"):
+        _stub_project_pipeline(monkeypatch, dosage, p)
+        with pytest.raises(PanelCacheError, match="below the configured minimum"):
             project_target(
                 target_bed=tmp_path / "target.bed",
                 cache_dir=cache,
                 plink2_runner=_unused_runner,
                 work_dir=tmp_path / "work",
             )
+
+    def test_project_target_passes_at_default_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Wired success path: a target above the DEFAULT floor (no
+        # min_overlap_snps argument) projects normally. Guards against an
+        # inverted comparison / wrong default that the helper-only boundary
+        # test would miss.
+        rng = np.random.default_rng(3)
+        m = 12_000  # above the default 10k floor
+        p = rng.uniform(0.05, 0.95, size=(m, 2))
+        dosage = rng.binomial(2, p @ np.array([0.5, 0.5])).astype(np.float64)
+        cache = _write_cache_dir(tmp_path, strand_ambiguous_excluded=True)
+        _stub_project_pipeline(monkeypatch, dosage, p)
+        result = project_target(
+            target_bed=tmp_path / "target.bed",
+            cache_dir=cache,
+            plink2_runner=_unused_runner,
+            work_dir=tmp_path / "work",
+        )  # default min_overlap_snps applies and must NOT refuse
+        assert result.converged
+        assert result.n_snps_used == m

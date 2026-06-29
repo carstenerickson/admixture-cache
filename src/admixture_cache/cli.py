@@ -34,7 +34,11 @@ from admixture_cache.io import (
     sha256_file,
     verify_cache_matches_current_config,
 )
-from admixture_cache.orchestration import project_target, project_target_gl
+from admixture_cache.orchestration import (
+    _DEFAULT_MIN_OVERLAP_SNPS,
+    project_target,
+    project_target_gl,
+)
 
 
 def _detect_admixture_version(binary: str = "admixture") -> str | None:
@@ -56,6 +60,24 @@ def _detect_admixture_version(binary: str = "admixture") -> str | None:
                 if tok and tok[0].isdigit() and "." in tok:
                     return tok
     return None
+
+
+def _parse_min_overlap_snps(value: str) -> int:
+    """argparse type for --min-overlap-snps. A non-negative integer; 0 disables
+    the floor. Rejects negatives so a fat-fingered ``-10000`` errors loudly
+    instead of silently disabling the guard."""
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--min-overlap-snps: expected a non-negative integer "
+            f"(0 disables), got {value!r}",
+        ) from exc
+    if n < 0:
+        raise argparse.ArgumentTypeError(
+            f"--min-overlap-snps: must be >= 0 (0 disables the floor), got {n}",
+        )
+    return n
 
 
 def _parse_max_parallel_restarts(value: str) -> int | None:
@@ -463,10 +485,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "used only with --target-bed",
     )
     p_project.add_argument(
-        "--min-overlap-snps", type=int, default=10_000,
+        "--min-overlap-snps", type=_parse_min_overlap_snps,
+        default=_DEFAULT_MIN_OVERLAP_SNPS,
         help="refuse to project a target overlapping the panel at fewer than "
-        "this many usable SNPs (default 10000); ancestry is unstable below "
-        "~10000-15000 SNPs and a sparse target yields a meaningless Q "
+        "this many usable SNPs (default %(default)s); ancestry is unstable in "
+        "the low thousands and a sparse target yields a meaningless Q "
         "(SCIENCE.md D10/D20). Pass 0 to disable.",
     )
     p_project.add_argument(

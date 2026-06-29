@@ -56,12 +56,13 @@ def _check_min_overlap(n_obs: int, min_overlap_snps: int) -> None:
     if min_overlap_snps > 0 and n_obs < min_overlap_snps:
         raise PanelCacheError(
             f"project: target overlaps the panel at only {n_obs} usable SNP(s), "
-            f"below the minimum of {min_overlap_snps}. Ancestry proportions are "
-            f"unstable below ~10,000-15,000 SNPs (Flegontov et al. 2020, "
-            f"doi:10.1101/2020.01.06.885103), so this projection would likely "
-            f"return a confident but meaningless Q. Lower min_overlap_snps (CLI "
-            f"--min-overlap-snps; 0 disables) to override if you accept the "
-            f"uncertainty.",
+            f"below the configured minimum of {min_overlap_snps} "
+            f"(min_overlap_snps). Ancestry proportions degrade as the "
+            f"overlapping-SNP count falls and are unreliable in the low "
+            f"thousands (Flegontov et al. 2020, doi:10.1101/2020.01.06.885103), "
+            f"so a target this sparse would likely return a confident but "
+            f"meaningless Q. Lower min_overlap_snps (CLI --min-overlap-snps; "
+            f"0 disables) to override if you accept the uncertainty.",
         )
 
 

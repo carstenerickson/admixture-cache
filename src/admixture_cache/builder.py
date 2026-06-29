@@ -297,6 +297,28 @@ def build_panel_cache(
             expected_panel_pop_sha256=panel_pop_sha,
         )
         if matched:
+            # Self-heal a cache that matches config but is missing panel.pop
+            # in the cache dir (gh #719). Caches built by any release before
+            # 1.6.0 (before panel.pop was copied into the cache dir) have a
+            # valid manifest but no panel.pop on disk, so the runtime
+            # validator rejects them and this no-op would otherwise leave
+            # them broken forever. panel.pop
+            # is a verbatim copy of panel_pop_file, whose sha the manifest
+            # already attests (a matching non-null panel_pop_sha256 means the
+            # bytes are identical; a legacy null sha is not pinned), so the
+            # backfill is safe and needs no ADMIXTURE rebuild. Only panel.pop
+            # is reconstructable this way: the P/Q/bim/restart_sd outputs are
+            # build products, so this does not widen the existing
+            # manifest-match short-circuit beyond the one input-derived file.
+            cached_pop = cache_dir / "panel.pop"
+            if not cached_pop.exists():
+                shutil.copy2(panel_pop_file, cached_pop)
+                logger.info(
+                    "build_panel_cache: backfilled missing panel.pop into %s "
+                    "(cache matched config but predated the in-cache "
+                    "panel.pop).",
+                    cache_dir,
+                )
             logger.info(
                 "build_panel_cache: cache at %s matches current config; "
                 "skipping rebuild (no-op).",

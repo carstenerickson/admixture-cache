@@ -163,7 +163,7 @@ class TestBuildPanelCache:
         assert (cache_dir / "panel.bim").is_file()
         assert (cache_dir / "restart_sd.json").is_file()
         assert (cache_dir / "cluster_order.json").is_file()
-        # gh #719: panel.pop is part of the cache contract — the runtime
+        # gh #719: panel.pop is part of the cache contract: the runtime
         # validator rejects a cache that lacks it and falls back to full
         # ADMIXTURE. It was missing from this assertion list, which is how
         # the bug shipped.
@@ -175,7 +175,7 @@ class TestBuildPanelCache:
     ) -> None:
         """gh #719: the copied panel.pop must be byte-identical to the source
         supervised-label file and its sha must equal the manifest's
-        panel_pop_sha256 — the exact guard the runtime validator
+        panel_pop_sha256, the exact guard the runtime validator
         (verify_cache_matches_current_config) applies at projection time.
         Without this, a freshly built cache is rejected as stale."""
         cached_pop = cache_dir / "panel.pop"

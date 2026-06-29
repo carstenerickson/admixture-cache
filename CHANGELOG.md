@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-29
+
 ### Added
 
 - **Minimum overlapping-SNP floor at projection (SCIENCE.md D10/D20).**
@@ -148,6 +150,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any existing cache.
 
 ### Fixed
+
+- **`build_panel_cache` never copied `panel.pop` into the cache dir, so
+  every freshly built cache was rejected as stale at projection time
+  (gh #719).** The runtime cache validator requires `panel.pop` in the cache
+  dir and checks its sha against the manifest's `panel_pop_sha256`; without
+  the file the consuming pipeline logged the cache as stale and silently fell
+  back to a full multi-hour ADMIXTURE recompute, making the build and the
+  published-cache download path a no-op end to end. The build finalization now
+  copies `panel.pop` alongside `panel.bim` (its bytes are exactly what the
+  manifest already attests, so no new sha is computed). The idempotency
+  short-circuit additionally self-heals an already-built cache: when a cache
+  matches the current config but lacks `panel.pop` on disk, the file is
+  backfilled in place without re-running ADMIXTURE. Only `panel.pop` is
+  reconstructable this way (it is a verbatim copy of the attested input
+  `panel_pop_file`); the P/Q/bim build products are not, so the long-standing
+  manifest-match short-circuit is not otherwise widened. Caches built by any
+  release before 1.6.0 are repaired the next time `build_panel_cache` runs for
+  them.
 
 - **`ld_prune_panel` parameter `window_kb` was a misnomer (SCIENCE.md
   D7).** The value is passed straight to `plink2 --indep-pairwise` as a
@@ -769,7 +789,9 @@ multi-thousand-sample workloads).
 - **`ToolRunner` Protocol** — minimal `run(args, cwd, log_dir, timeout_seconds)` interface; admixture-cache invokes plink2 + ADMIXTURE through it, with no host-framework dependency.
 - **Cache I/O + verification helpers** — `load_cached_p`, `load_cache_manifest`, `verify_cache_matches_current_config`, `sha256_file`. The verification helper returns `(matched, reason)` so callers can log the specific SHA divergence rather than chasing a generic "cache invalid".
 
-[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/carstenerickson/admixture-cache/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/carstenerickson/admixture-cache/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/carstenerickson/admixture-cache/compare/v1.3.0...v1.4.0

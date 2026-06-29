@@ -220,6 +220,7 @@ class TestProjectTarget:
             cache_dir=cache_dir,
             plink2_runner=plink2_runner,
             work_dir=work_dir,
+            min_overlap_snps=0,  # 2000-SNP test fixture; disable the floor
         )
         assert result.converged
         assert result.cluster_order == ["A", "B", "C"]
@@ -246,6 +247,7 @@ class TestProjectTarget:
             cache_dir=cache_dir,
             plink2_runner=plink2_runner,
             work_dir=work_dir,
+            min_overlap_snps=0,  # 2000-SNP test fixture; disable the floor
         )
         assert result.n_snps_used == 2000
 
@@ -298,6 +300,7 @@ class TestProjectTarget:
             cache_dir=cache_dir,
             plink2_runner=plink2_runner,
             work_dir=work_dir / "proj",
+            min_overlap_snps=0,  # 2000-SNP test fixture; disable the floor
         )
         assert result.converged
         # Only the SNPs the target still carries are used (NaN-filled gaps

@@ -34,7 +34,11 @@ from admixture_cache.io import (
     sha256_file,
     verify_cache_matches_current_config,
 )
-from admixture_cache.orchestration import project_target, project_target_gl
+from admixture_cache.orchestration import (
+    _DEFAULT_MIN_OVERLAP_SNPS,
+    project_target,
+    project_target_gl,
+)
 
 
 def _detect_admixture_version(binary: str = "admixture") -> str | None:
@@ -56,6 +60,24 @@ def _detect_admixture_version(binary: str = "admixture") -> str | None:
                 if tok and tok[0].isdigit() and "." in tok:
                     return tok
     return None
+
+
+def _parse_min_overlap_snps(value: str) -> int:
+    """argparse type for --min-overlap-snps. A non-negative integer; 0 disables
+    the floor. Rejects negatives so a fat-fingered ``-10000`` errors loudly
+    instead of silently disabling the guard."""
+    try:
+        n = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--min-overlap-snps: expected a non-negative integer "
+            f"(0 disables), got {value!r}",
+        ) from exc
+    if n < 0:
+        raise argparse.ArgumentTypeError(
+            f"--min-overlap-snps: must be >= 0 (0 disables the floor), got {n}",
+        )
+    return n
 
 
 def _parse_max_parallel_restarts(value: str) -> int | None:
@@ -173,6 +195,7 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             target_gl_beagle=ns.gl_beagle,
             cache_dir=ns.cache_dir,
             exclude_strand_ambiguous=exclude,
+            min_overlap_snps=ns.min_overlap_snps,
         )
     else:
         if ns.work_dir is None:
@@ -188,6 +211,7 @@ def _cmd_project(ns: argparse.Namespace) -> int:
             plink2_runner=runner,
             work_dir=ns.work_dir,
             exclude_strand_ambiguous=exclude,
+            min_overlap_snps=ns.min_overlap_snps,
         )
     if ns.json:
         payload = {
@@ -459,6 +483,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--plink2-binary", default="plink2",
         help="path to plink2 binary (default: looked up on PATH); "
         "used only with --target-bed",
+    )
+    p_project.add_argument(
+        "--min-overlap-snps", type=_parse_min_overlap_snps,
+        default=_DEFAULT_MIN_OVERLAP_SNPS,
+        help="refuse to project a target overlapping the panel at fewer than "
+        "this many usable SNPs (default %(default)s); ancestry is unstable in "
+        "the low thousands and a sparse target yields a meaningless Q "
+        "(SCIENCE.md D10/D20). Pass 0 to disable.",
     )
     p_project.add_argument(
         "--json", action="store_true",

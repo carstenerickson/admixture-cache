@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "admixture-cache"
-version = "1.6.0"
+version = "1.6.1"
 description = "Precomputed-P supervised-ADMIXTURE projection cache: build slow once, project fast per target."
 readme = "README.md"
 license = { text = "MIT" }

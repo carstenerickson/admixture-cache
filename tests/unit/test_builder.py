@@ -24,7 +24,7 @@ from admixture_cache import (
 from admixture_cache._paths import append_suffix
 from admixture_cache.builder import (
     _auto_max_parallel_restarts,
-    _count_unlabeled_pop_rows,
+    _derive_cluster_order_from_pop_file,
     _parse_admixture_loglikelihood,
 )
 from admixture_cache.io import sha256_file
@@ -504,11 +504,34 @@ class TestBuildPanelCacheIdempotency:
         assert sd["best_seed"] == 3
         assert sd["loglikelihood_spread"] == 100.0
         assert sd["panel_has_free_q"] is False
-        # Round-trips through the manifest schema.
+        # Round-trips through the manifest schema (spread + free-Q flag).
         reloaded = PanelCacheManifest.model_validate_json(
             (cache_dir / "manifest.json").read_text(),
         )
         assert reloaded.loglikelihood_spread == 100.0
+        assert reloaded.panel_has_free_q is False
+
+    def test_single_restart_spread_is_none(self, tmp_path: Path) -> None:
+        """SCIENCE.md D4: with fewer than two parseable restarts the spread
+        is None (not 0.0), so a consumer can tell 'unknown' from 'all
+        restarts agreed' (covers the manifest's documented None branch)."""
+        panel_bed = _write_panel_triplet(tmp_path, n_samples=4, n_snps=10)
+        pop = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
+        yaml = _write_clusters_yaml(tmp_path)
+        cache_dir = tmp_path / "cache"
+        runner = _FakeAdmixtureRunner(
+            k=2, n_samples=4, n_snps=10, seed_to_ll={1: -100.0},
+        )
+        manifest = build_panel_cache(
+            panel_bed=panel_bed, panel_pop_file=pop, clusters_yaml=yaml,
+            k=2, cache_dir=cache_dir, admixture_runner=runner,
+            track="regional", panel_id="p1", panel_version="v1",
+            admixture_version="1.4.0", seeds=[1], sd_threshold=10.0,
+        )
+        assert manifest.loglikelihood_spread is None
+        sd = json.loads((cache_dir / "restart_sd.json").read_text())
+        assert sd["loglikelihood_spread"] is None
+        assert sd["per_seed_loglikelihood"] == {"1": -100.0}
 
     def test_free_q_panel_below_floor_warns(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
@@ -565,13 +588,28 @@ class TestBuildPanelCacheIdempotency:
             )
         assert "unlabeled" not in caplog.text
 
-    def test_count_unlabeled_pop_rows(self, tmp_path: Path) -> None:
-        """Counts '-' rows; ignores labels and blank lines."""
+    def test_derive_cluster_order_counts_unlabeled_rows(
+        self, tmp_path: Path,
+    ) -> None:
+        """The single-pass parser returns the unlabeled-row count using the
+        SAME blank-or-'-' predicate it uses to skip non-label rows, so a
+        free-Q panel written with blank rows (not '-') is still detected
+        (the gh #9 review gap)."""
+        # Fully labeled: zero unlabeled.
         labeled = _write_pop_file(tmp_path, ["A", "B", "A", "B"])
-        assert _count_unlabeled_pop_rows(labeled) == 0
+        order, n_unlabeled = _derive_cluster_order_from_pop_file(
+            panel_pop_file=labeled, expected_k=2,
+        )
+        assert order == ["A", "B"]
+        assert n_unlabeled == 0
+        # Mixed '-' and blank unlabeled rows: BOTH count as free Q.
         mixed = tmp_path / "mixed.pop"
-        mixed.write_text("A\n-\nB\n-\n-\n")
-        assert _count_unlabeled_pop_rows(mixed) == 3
+        mixed.write_text("A\n-\nB\n\n-\n")  # 2 dash rows + 1 blank row
+        order2, n_unlabeled2 = _derive_cluster_order_from_pop_file(
+            panel_pop_file=mixed, expected_k=2,
+        )
+        assert order2 == ["A", "B"]
+        assert n_unlabeled2 == 3
 
     def test_multimodality_failure_raises(self, tmp_path: Path) -> None:
         """If per-cluster restart SD exceeds threshold, no manifest is

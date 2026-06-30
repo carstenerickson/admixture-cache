@@ -248,7 +248,7 @@ now makes multimodality observable and warns when it is most likely to bite.
   manifest carries the compact `loglikelihood_spread` (null for a single-restart
   or legacy build). The raw spread is in loglikelihood units and scales with
   panel size, so it is a within-cache diagnostic, not a cross-cache threshold.
-- **Free-Q advisory.** The build counts unlabeled (`-`) rows. When the panel has
+- **Free-Q advisory.** The build counts unlabeled (blank or `-`) rows. When the panel has
   free Q AND fewer than 10 restarts were run, it logs a warning recommending at
   least 10 replicates (Skoglund et al., 2012, doi:10.1126/science.1216304; pong,
   Behr et al., 2016, doi:10.1093/bioinformatics/btw327), more at higher K. The

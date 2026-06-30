@@ -7,6 +7,12 @@ For each decision this document records what the code does (with a file and line
 reference), a verdict on whether the choice is methodologically sound, and the
 supporting or contradicting literature.
 
+**Status (2026-06-30): the audit is complete; every flagged decision point is
+resolved.** Five decisions carried actionable gaps. Four shipped in **v1.6.0**
+(D7, D10/D20, D11, D17); the fifth (D4) is on `main`, pending the next release.
+All other decisions are sound as audited. The `(v1.6.0)` and `(Unreleased)` tags
+on each resolution below mark where the fix landed.
+
 ## How to read this
 
 Verdict labels:
@@ -37,18 +43,18 @@ If you only act on a few items, these are the ones that can change a result
 silently:
 
 1. **Minimum overlapping-SNP floor** at projection (D10, D20): RESOLVED
-   (Unreleased). A sparse target could return a confident, converged-looking but
+   (v1.6.0). A sparse target could return a confident, converged-looking but
    meaningless Q; `project_target` / `project_target_gl` now refuse below
    `min_overlap_snps` (default 10,000; `--min-overlap-snps`, 0 to disable).
    Target-side contamination and platform/batch QC remain the caller's
    responsibility (documented caveats).
-2. **Strand-ambiguous A/T and C/G SNPs** (D11): RESOLVED (Unreleased).
+2. **Strand-ambiguous A/T and C/G SNPs** (D11): RESOLVED (v1.6.0).
    Previously ID-based `--alt1-allele` forcing could leave these on the
    wrong strand, silently inverting allele counts. Now excluded by default
    at both build time (`strip_strand_ambiguous_snps` plus a build guard)
    and projection time (`plink2 --exclude`), with a `--keep-strand-ambiguous`
    opt-out.
-3. **Pseudo-haploid / low-coverage handling** (D17): addressed (Unreleased).
+3. **Pseudo-haploid / low-coverage handling** (D17): addressed (v1.6.0).
    The projection point estimate is NOT biased by pseudo-haploid data coded as
    diploid (the diploid and Bernoulli likelihoods share an argmax, verified), so
    no `ploidy` knob was added. A heterozygosity warning flags essentially-zero-het
@@ -61,7 +67,7 @@ silently:
    at 5; the build now records per-seed loglikelihoods + their spread and warns
    when a free-Q panel is built below 10 restarts, rather than silently
    multiplying build cost.
-5. **LD-pruning window units** (D7): RESOLVED (Unreleased). The `window_kb`
+5. **LD-pruning window units** (D7): RESOLVED (v1.6.0). The `window_kb`
    parameter mislabeled a plink2 `--indep-pairwise` variant-count window as kb.
    Renamed to `window_size` (documented as variants), `window_kb` kept as a
    deprecated alias (passing both raises `TypeError`), and the default raised
@@ -340,7 +346,7 @@ correlation between Q matrices (Frichot and Francois, 2013, arXiv:1309.6208).
 (`ld_prune_panel`, `builder.py`). The window is a variant count, not kb.
 
 **Verdict: Sound (units clarified and default raised to match the field
-standard; Unreleased).** Originally `50 5 0.5` with a `window_kb` parameter
+standard; v1.6.0).** Originally `50 5 0.5` with a `window_kb` parameter
 that mislabeled the variant-count window as kb.
 
 **Literature.** The unlinked-marker assumption is fundamental to ADMIXTURE, and
@@ -354,14 +360,14 @@ ADMIXTURE accuracy benchmarks are scarce (the justification is theoretical).
 
 **Caveats and flags.**
 
-- **Window units (RESOLVED, Unreleased).** The original code passed
+- **Window units (RESOLVED, v1.6.0).** The original code passed
   `str(window_kb)` = "50" to plink2 with no `kb` suffix, so plink2 read it as a
   50-variant window, not the 50 kb the parameter name and docstring implied
   (confirmed against plink2 v2.0.0: a `kb` window also requires step 1, which the
   default step of 5 violated, so the "kb" reading was never even valid). The
   parameter is now `window_size`, documented as variants; `window_kb` remains a
   deprecated alias, and passing both raises `TypeError`.
-- **r-squared default raised to 0.4 (RESOLVED, Unreleased).** The old `0.5` sat
+- **r-squared default raised to 0.4 (RESOLVED, v1.6.0).** The old `0.5` sat
   at the lenient end of the published range; the default is now `0.4`, the modal
   value in the human ancient-DNA ADMIXTURE literature (window 200, step 25). A
   corpus methods survey found variant-count windows used over kb roughly 17:1
@@ -450,7 +456,7 @@ is standard).
 
 **Caveats and flags.**
 
-- **Minimum-overlap floor (RESOLVED, Unreleased).** Ancestry proportions are
+- **Minimum-overlap floor (RESOLVED, v1.6.0).** Ancestry proportions are
   documented as highly unstable below roughly 10,000 to 15,000 SNPs (Flegontov
   et al., 2020, doi:10.1101/2020.01.06.885103), and real aDNA pipelines
   hard-code floors of 20,000 (Sirak et al., 2021,
@@ -486,7 +492,7 @@ alignment, and removal of ambiguous alleles are prerequisites (best-practices
 PCA toolkit, 2020, doi:10.1093/bioinformatics/btaa520; MESA, 2012,
 doi:10.1371/journal.pgen.1002640).
 
-**Status: the strand-ambiguous gap below is FIXED (Unreleased).** Empirically
+**Status: the strand-ambiguous gap below is FIXED (v1.6.0).** Empirically
 confirmed against plink2 v2.0.0 that an opposite-strand A/T or C/G target was
 silently inverted (homozygotes flip 0 to 2) while a non-ambiguous SNP was not.
 The fix excludes strand-ambiguous SNPs by default at build time
@@ -653,11 +659,11 @@ nf-core/eager, 2021, doi:10.7717/peerj.10947).
 **What we do.** The target is read as plink2 additive 0/1/2 dosages and fed to a
 Binomial(g; 2, f) likelihood that hard-codes n=2 (`alignment.py:185-241`,
 `projection.py:95-99`). `project_target` now computes the target's
-heterozygosity and warns when it is essentially zero (Unreleased).
+heterozygosity and warns when it is essentially zero (v1.6.0).
 
 **Verdict: Sound (the headline pseudo-haploid bias does not apply to this tool's
 projection; a heterozygosity warning and a low-coverage genotype-likelihood path
-are now provided; Unreleased).**
+are now provided; v1.6.0).**
 
 **Key correction (verified analytically and numerically).** For pseudo-haploid
 hard calls (g in {0,2}) the diploid Binomial(2, f) negative log-likelihood is
@@ -678,13 +684,13 @@ parameter was therefore deliberately NOT added (it would be an inert knob).
 
 **Caveats and flags.**
 
-- **Heterozygosity warning (added, Unreleased).** `project_target` warns when the
+- **Heterozygosity warning (added, v1.6.0).** `project_target` warns when the
   observed heterozygosity is essentially zero, which flags pseudo-haploid /
   haploidized data or a very low-coverage diploid sample. Heterozygosity cannot
   by itself separate those two (low-coverage diploid is also depressed,
   doi:10.1186/s12864-015-1219-8), so it is advisory and never changes the
   projection. The observed rate is reported on `ProjectionResult.heterozygosity`.
-- **Genotype-likelihood path (added, Unreleased).** The real improvement for
+- **Genotype-likelihood path (added, v1.6.0).** The real improvement for
   genuinely low-coverage data is a genotype-likelihood method (NGSadmix /
   fastNGSadmix), whose per-site likelihood `GL(0)(1-f)^2 + GL(1)2f(1-f) +
   GL(2)f^2` downweights uncertain sites and so does change (and improve) the
@@ -768,7 +774,7 @@ an already-curated set. The genuine gap is target-side QC.
 
 **Caveats and flags.**
 
-- **Minimum overlapping-SNP floor (RESOLVED, Unreleased).** Same gap as D10,
+- **Minimum overlapping-SNP floor (RESOLVED, v1.6.0).** Same gap as D10,
   now fixed: `project_target` / `project_target_gl` refuse a target whose usable
   overlap is below `min_overlap_snps` (default 10,000; `--min-overlap-snps`,
   0 to disable), since ancestry is unstable below ~10,000 to 15,000 SNPs

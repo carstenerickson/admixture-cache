@@ -298,6 +298,23 @@ class TestListAvailableCaches:
         # version_number sort yields v2 first
         assert max(releases, key=lambda r: r.version_number).version == "v2"
 
+    def test_accepts_uppercase_continent_in_cache_key(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ancestral_cluster cache keys fold the continent verbatim, and some
+        continents carry uppercase (e.g. ac_W_Eurasia_k4_<sha>). The tag grammar
+        must accept that casing or such a release is silently undiscoverable.
+        GitHub tags are case-sensitive and the runtime looks the key up with the
+        same casing, so an uppercase-name release round-trips exactly."""
+        name = "ac_W_Eurasia_k4_28db6795"
+        payload = _fake_releases_payload(name=name, versions=["v1"])
+        url = f"https://api.github.com/repos/{DEFAULT_GITHUB_REPO}/releases"
+        _patch_urlopen_chain(monkeypatch, {url: json.dumps(payload).encode()})
+        releases = list_available_caches()
+        assert len(releases) == 1
+        assert releases[0].name == name
+        assert releases[0].version == "v1"
+
     def test_skips_releases_without_matching_tag(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

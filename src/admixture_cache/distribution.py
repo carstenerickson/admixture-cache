@@ -60,8 +60,12 @@ logger = logging.getLogger(__name__)
 
 
 # Tag convention: cache-<name>-<version>
-# - <name>: lowercase letters, digits, underscores (matches the
-#   panel/track ids used elsewhere in the library, e.g. `regional_k21_aadr_v66_ho`)
+# - <name>: ASCII letters (upper OR lower), digits, underscores. Lowercase is
+#   the convention for panel/track ids (e.g. `regional_k21_aadr_v66_ho`), but
+#   ancestral_cluster cache keys fold the continent verbatim and some continents
+#   carry uppercase (e.g. `ac_W_Eurasia_k4_<sha>`); the grammar accepts uppercase
+#   so those caches stay discoverable. GitHub tags are case-sensitive and the
+#   runtime looks the key up with the same casing, so the round-trip is exact.
 # - <version>: `v` followed by one or more digits (`v1`, `v2`, …)
 # Split on the LAST hyphen so names containing hyphens parse correctly
 # (we recommend underscores to avoid this entirely).
@@ -69,7 +73,7 @@ logger = logging.getLogger(__name__)
 # in tag names don't accidentally match (defensive — git refuses
 # newlines in refs but the regex should be strict).
 _TAG_PATTERN = re.compile(
-    r"\Acache-([a-z0-9_]+(?:-[a-z0-9_]+)*)-(v\d+)\Z",
+    r"\Acache-([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)-(v\d+)\Z",
 )
 
 # Default GitHub repo to query for releases. Operators publishing

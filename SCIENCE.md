@@ -55,8 +55,12 @@ silently:
    (pseudo-haploid / very low coverage) input, and a genotype-likelihood
    projection path (`project_target_gl` / CLI `--gl-beagle`, the real low-coverage
    improvement) is now provided.
-4. **Restart default of 5** (D4): below the common 10 to 100 range for
-   panels that contain unlabeled (free-Q) samples.
+4. **Restart default of 5** (D4): RESOLVED (Unreleased). Five is below the
+   common 10 to 100 range for panels with unlabeled (free-Q) samples, but is
+   harmless for a fully-labeled panel (deterministic, D15). The default is kept
+   at 5; the build now records per-seed loglikelihoods + their spread and warns
+   when a free-Q panel is built below 10 restarts, rather than silently
+   multiplying build cost.
 5. **LD-pruning window units** (D7): RESOLVED (Unreleased). The `window_kb`
    parameter mislabeled a plink2 `--indep-pairwise` variant-count window as kb.
    Renamed to `window_size` (documented as variants), `window_kb` kept as a
@@ -70,7 +74,7 @@ silently:
 | D1 | Hold panel P fixed, solve only target Q (projection) | projection.py:37; orchestration.py:124 | Sound with caveats |
 | D2 | Binomial / Hardy-Weinberg admixture likelihood | projection.py:95 | Sound with caveats |
 | D3 | Supervised ADMIXTURE with fixed `.pop` labels | builder.py:802 | Sound with caveats |
-| D4 | Number of random restarts (default 5) | builder.py:253 | Caution |
+| D4 | Number of random restarts (default 5) | builder.py:253 | Sound with caveats (diagnostics + free-Q advisory added; default kept) |
 | D5 | Best-loglikelihood restart selected as canonical | builder.py:569 | Sound with caveats |
 | D6 | Multimodality gate: max per-cell Q SD > 0.02 fails | builder.py:159, 596 | Sound with caveats |
 | D7 | Optional LD pruning (`--indep-pairwise 200 25 0.4`) | builder.py:970 | Sound (units fixed, default raised) |
@@ -209,7 +213,8 @@ reduces target bias but assumes the reference labels are correct and exhaustive
 **What we do.** The build runs N random-seed restarts of supervised ADMIXTURE
 (default `seeds=[1,2,3,4,5]`) and keeps the best (`builder.py:253-254`).
 
-**Verdict: Caution.**
+**Verdict: Sound with caveats (per-restart diagnostics + a free-Q advisory
+added; default kept at 5, Unreleased).**
 
 **Literature.** Multiple restarts to escape local optima of a multimodal
 likelihood is the correct mitigation in principle (fastSTRUCTURE, Raj et al.,
@@ -231,6 +236,36 @@ standard errors.
   The concern bites only when the panel contains unlabeled `-` rows so Q is free.
 - Seeds are fixed `[1..5]`, which is good for reproducibility but always samples
   the same five basins.
+
+**Resolution (Unreleased).** The default restart count stays at 5: it is
+harmless for a fully-labeled panel (deterministic, D15), and silently
+multiplying everyone's (multi-hour) build cost was rejected. Instead the build
+now makes multimodality observable and warns when it is most likely to bite.
+
+- **Per-restart loglikelihoods recorded.** `restart_sd.json` now carries each
+  seed's final loglikelihood (`per_seed_loglikelihood`), the best seed, the
+  best-minus-worst `loglikelihood_spread`, and whether the panel had free Q; the
+  manifest carries the compact `loglikelihood_spread` (null for a single-restart
+  or legacy build). The raw spread is in loglikelihood units and scales with
+  panel size, so it is a within-cache diagnostic, not a cross-cache threshold.
+- **Free-Q advisory.** The build counts unlabeled (blank or `-`) rows. When the panel has
+  free Q AND fewer than 10 restarts were run, it logs a warning recommending at
+  least 10 replicates (Skoglund et al., 2012, doi:10.1126/science.1216304; pong,
+  Behr et al., 2016, doi:10.1093/bioinformatics/btw327), more at higher K. The
+  warning is advisory; the cache is still written. A fully-labeled panel never
+  warns (its restarts are deterministic).
+- **No absolute-loglikelihood agreement gate (deliberate).** The published
+  convergence test is cross-replicate Q agreement (CLUMPP / pong mode
+  membership, similarity coefficient > 0.9), reported as "X of N runs in the
+  major mode" (e.g. Jakobsson et al., 2008, doi:10.1038/nature06742), not an
+  absolute loglikelihood margin. The existing per-cell Q SD gate (D6) already
+  encodes that agreement test, valid here because supervised mode anchors the
+  columns so there is no label switching, and an absolute loglikelihood margin
+  would not be scale-free. So we record the loglikelihood spread for
+  transparency but continue to gate on Q SD, not on LL.
+- **Recommended seed count.** For a free-Q panel use at least 10 seeds (e.g.
+  `seeds=list(range(1, 11))`), scaling up at higher K; for a fully-labeled panel
+  1 to 5 is sufficient. Documented on `build_panel_cache`.
 
 ## D5. Best-loglikelihood restart selected as canonical
 

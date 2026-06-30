@@ -115,6 +115,24 @@ class PanelCacheManifest(BaseModel):
     best_seed: int
     best_loglikelihood: float
     restart_sd_max: float
+    # Spread (best minus worst) of the parseable per-restart final
+    # loglikelihoods, a headline multimodality signal: ~0 means every
+    # restart reached the same optimum, a large value means they did not
+    # (SCIENCE.md D4). None when fewer than two restarts produced a
+    # parseable loglikelihood (single-restart or legacy build). The full
+    # per-seed loglikelihoods live in restart_sd.json. Provenance only;
+    # not part of the cache-validity gate. Note the raw spread is in
+    # loglikelihood units and so scales with panel size; it is a within-
+    # cache diagnostic, not a cross-cache absolute threshold.
+    loglikelihood_spread: float | None = None
+    # Whether the panel had unlabeled (free-Q) rows, i.e. samples whose Q
+    # ADMIXTURE estimated rather than pinning to a label (SCIENCE.md D4).
+    # False: fully labeled, so restarts are deterministic (D15) and the
+    # restart count / loglikelihood_spread carry no multimodality signal.
+    # True: free Q, so seeds_used and loglikelihood_spread are meaningful
+    # and 5 restarts may under-sample. None: legacy cache built before this
+    # field existed. Provenance only; not part of the cache-validity gate.
+    panel_has_free_q: bool | None = None
     cluster_order: list[str]
     geo_filter_yaml_shas: dict[str, str] = Field(default_factory=dict)
     pgen_samplebind_version: str | None = None

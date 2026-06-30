@@ -99,26 +99,33 @@ class TestDeriveClusterOrderFromPopFile:
         pop = tmp_path / "panel.pop"
         # First-appearance order: B, A, C
         pop.write_text("B\nA\nB\nC\n-\nA\n")
-        order = _derive_cluster_order_from_pop_file(
+        order, n_unlabeled = _derive_cluster_order_from_pop_file(
             panel_pop_file=pop, expected_k=3,
         )
         assert order == ["B", "A", "C"]
+        assert n_unlabeled == 1  # one '-' row
 
     def test_dash_lines_ignored(self, tmp_path: Path) -> None:
         pop = tmp_path / "panel.pop"
         pop.write_text("-\n-\nA\n-\nB\n-\n")
-        order = _derive_cluster_order_from_pop_file(
+        order, n_unlabeled = _derive_cluster_order_from_pop_file(
             panel_pop_file=pop, expected_k=2,
         )
         assert order == ["A", "B"]
+        assert n_unlabeled == 4  # four '-' rows
 
-    def test_empty_lines_ignored(self, tmp_path: Path) -> None:
+    def test_empty_lines_ignored_for_order_but_counted_unlabeled(
+        self, tmp_path: Path,
+    ) -> None:
         pop = tmp_path / "panel.pop"
         pop.write_text("\n\nA\n\nB\n\n")
-        order = _derive_cluster_order_from_pop_file(
+        order, n_unlabeled = _derive_cluster_order_from_pop_file(
             panel_pop_file=pop, expected_k=2,
         )
         assert order == ["A", "B"]
+        # Blank lines contribute no label but ARE unlabeled (free-Q) rows,
+        # matching how ADMIXTURE reads a positionally-aligned .pop (gh #9).
+        assert n_unlabeled == 4
 
     def test_unexpected_k_count_raises(self, tmp_path: Path) -> None:
         pop = tmp_path / "panel.pop"
@@ -139,10 +146,11 @@ class TestDeriveClusterOrderFromPopFile:
     def test_duplicates_collapsed(self, tmp_path: Path) -> None:
         pop = tmp_path / "panel.pop"
         pop.write_text("A\nA\nA\nB\nB\nA\nB\nC\nC\n")
-        order = _derive_cluster_order_from_pop_file(
+        order, n_unlabeled = _derive_cluster_order_from_pop_file(
             panel_pop_file=pop, expected_k=3,
         )
         assert order == ["A", "B", "C"]
+        assert n_unlabeled == 0
 
 
 class TestLoadCachedPIntegration:

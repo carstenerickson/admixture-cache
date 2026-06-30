@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multimodality diagnostics + free-Q restart advisory for
+  `build_panel_cache` (SCIENCE.md D4).** The build now records each
+  restart's final loglikelihood and their spread, so multimodality is
+  visible after the fact, and warns when a panel that actually needs
+  restarts was built with too few.
+  - `restart_sd.json` gains `per_seed_loglikelihood` (seed to final LL),
+    `best_seed`, `loglikelihood_spread` (best minus worst over parseable
+    restarts), and `panel_has_free_q`. The manifest gains compact optional
+    `loglikelihood_spread` and `panel_has_free_q` fields (null for
+    single-restart / legacy builds; `schema_version` stays 1, provenance
+    only), so a consumer can judge an under-replicated free-Q cache from
+    the manifest alone. The raw spread is in loglikelihood units and scales
+    with panel size, so it is a within-cache diagnostic, not a cross-cache
+    threshold. When the build instead fails the multimodality gate, the
+    `PanelCacheError` now includes the loglikelihood spread.
+  - A panel row counts as unlabeled (free Q) if it is blank OR `-`, the
+    same predicate used to derive cluster order, so a panel whose unlabeled
+    rows are written as blank lines is detected too (both come from a
+    single .pop parse). Duplicate seeds are dropped before building
+    (identical seeds give byte-identical ADMIXTURE restarts).
+  - When the panel has unlabeled rows (free Q, so the likelihood is
+    multimodal) AND fewer than 10 restarts were run, the build logs an
+    advisory warning recommending at least 10 replicates (Skoglund et al.
+    2012, doi:10.1126/science.1216304; pong, Behr et al. 2016,
+    doi:10.1093/bioinformatics/btw327), more at higher K. Advisory only:
+    the cache is still written, and a fully-labeled panel (deterministic
+    restarts, D15) never warns.
+  - The default restart count is unchanged (`seeds=[1,2,3,4,5]`): 5 is
+    harmless for a fully-labeled panel, and auto-scaling would silently
+    multiply build cost. No absolute-loglikelihood agreement gate was
+    added: cross-replicate consistency is a Q-similarity test (which the
+    existing per-cell Q SD gate already encodes), and an absolute LL
+    margin would not be scale-free.
+
 ## [1.6.0] - 2026-06-29
 
 ### Added
